@@ -681,10 +681,13 @@ static void set_dl_maxmimolayers(NR_PDSCH_ServingCellConfig_t *pdsch_servingcell
     pdsch_servingcellconfig->ext1->maxMIMO_Layers = calloc(1, sizeof(*pdsch_servingcellconfig->ext1->maxMIMO_Layers));
 
   long l = ue_supported_dl_layers(scc, uecap, dl_id);
-  long ue_supported_layers = l > 1 ? l : 2; // min UE supported layers = 2
-  if (maxMIMO_layers == -1) 
+  // Fall back to the configured maxMIMO_layers (not a hardcoded 2) when the UE capability is not yet
+  // available at config-build time, so ri_restriction reflects operator intent. Enables RI 3/4.
+  long cfg_fallback = (maxMIMO_layers > 1) ? maxMIMO_layers : 2;
+  long ue_supported_layers = l > 1 ? l : cfg_fallback;
+  if (maxMIMO_layers == -1)
     *pdsch_servingcellconfig->ext1->maxMIMO_Layers = min(NR_MAX_SUPPORTED_DL_LAYERS, ue_supported_layers);
-  else 
+  else
     *pdsch_servingcellconfig->ext1->maxMIMO_Layers = min(maxMIMO_layers, ue_supported_layers);
 }
 
@@ -1319,7 +1322,12 @@ static void config_pucch_resset1(const NR_ServingCellConfigCommon_t *scc,
   pucchfmt2->interslotFrequencyHopping = NULL;
   pucchfmt2->additionalDMRS = NULL;
   pucchfmt2->maxCodeRate = calloc(1,sizeof(*pucchfmt2->maxCodeRate));
-  *pucchfmt2->maxCodeRate = NR_PUCCH_MaxCodeRate_zeroDot15;
+  // The larger rank-3/4 CSI report (more PMI/CQI bits, TS 38.212 sec 6.3.1.1) does not fit the
+  // format-2 PUCCH at maxCodeRate 0.15 with the get_pucch2_size() 8-PRB heuristic: the UCI-bits <=
+  // (PRBs * REs * Qm * codeRate) capacity check (TS 38.213 sec 9.2.5.2, compute_pucch_prb_size() in
+  // nr_mac_common.c) fails (~20 bits needed vs ~19 available). Raising maxCodeRate to 0.25 lifts
+  // capacity to ~32 bits so RI 3/4 reports fit. maxCodeRate values per TS 38.331 PUCCH-MaxCodeRate.
+  *pucchfmt2->maxCodeRate = NR_PUCCH_MaxCodeRate_zeroDot25;
   pucchfmt2->nrofSlots = NULL;
   pucchfmt2->pi2BPSK = NULL;
 
