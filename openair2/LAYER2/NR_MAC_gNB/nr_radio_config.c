@@ -674,10 +674,13 @@ static void set_dl_maxmimolayers(NR_PDSCH_ServingCellConfig_t *pdsch_servingcell
     pdsch_servingcellconfig->ext1->maxMIMO_Layers = calloc(1, sizeof(*pdsch_servingcellconfig->ext1->maxMIMO_Layers));
 
   long l = ue_supported_dl_layers(scc, uecap);
-  long ue_supported_layers = l > 1 ? l : 2; // min UE supported layers = 2
-  if (maxMIMO_layers == -1) 
+  // Fall back to the configured maxMIMO_layers (not a hardcoded 2) when the UE capability is not yet
+  // available at config-build time, so ri_restriction reflects operator intent. Enables RI 3/4.
+  long cfg_fallback = (maxMIMO_layers > 1) ? maxMIMO_layers : 2;
+  long ue_supported_layers = l > 1 ? l : cfg_fallback;
+  if (maxMIMO_layers == -1)
     *pdsch_servingcellconfig->ext1->maxMIMO_Layers = min(NR_MAX_SUPPORTED_DL_LAYERS, ue_supported_layers);
-  else 
+  else
     *pdsch_servingcellconfig->ext1->maxMIMO_Layers = min(maxMIMO_layers, ue_supported_layers);
 }
 

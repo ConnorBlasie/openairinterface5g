@@ -458,6 +458,9 @@ typedef struct {
   uint8_t power_control_offset;     // Ratio of PDSCH EPRE to NZP CSI-RSEPRE [3GPP TS 38.214, sec 5.2.2.3.1], Value: 0->23 representing -8 to 15 dB in 1dB steps; 255: L1 is configured with ProfileSSS
   uint8_t power_control_offset_ss;  // Ratio of NZP CSI-RS EPRE to SSB/PBCH block EPRE [3GPP TS 38.214, sec 5.2.2.3.1], Values: 0: -3dB; 1: 0dB; 2: 3dB; 3: 6dB; 255: L1 is configured with ProfileSSS
   uint8_t measurement_bitmap;       // bit 0 RSRP, bit 1 RI, bit 2 LI, bit 3 PMI, bit 4 CQI, bit 5 i1
+  uint8_t ri_restriction; // gNB-signaled typeI-SinglePanel-ri-Restriction [3GPP TS 38.214 sec
+                          // 5.2.2.2.1, TS 38.331 CodebookConfig]: bit k set => rank (k+1) may be
+                          // reported. 0 => no CodebookConfig/restriction (estimator caps at N_ports).
   uint8_t last_trs_slot;            // indicates to PHY if the slot is end of TRS burst
 } fapi_nr_dl_config_csirs_pdu_rel15_t;
 

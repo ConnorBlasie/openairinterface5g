@@ -1195,6 +1195,27 @@ static uint8_t set_csirs_measurement_bitmap(NR_CSI_MeasConfig_t *csi_measconfig,
   return meas_bitmap;
 }
 
+// Return the gNB-signaled typeI-SinglePanel-ri-Restriction bitmap for the report config that measures
+// this CSI resource (TS 38.214 5.2.2.2.1, TS 38.331 CodebookConfig). Bit k set => rank (k+1) may be
+// reported; the UE PHY estimator must clamp its RI to this. 0 => no CodebookConfig (no restriction).
+static uint8_t get_csirs_ri_restriction(NR_CSI_MeasConfig_t *csi_measconfig, NR_CSI_ResourceConfigId_t csi_res_id)
+{
+  if (csi_res_id > NR_maxNrofCSI_ResourceConfigurations)
+    return 0; // CSI-RS for tracking, no report/codebook
+  for (int i = 0; i < csi_measconfig->csi_ReportConfigToAddModList->list.count; i++) {
+    NR_CSI_ReportConfig_t *report_config = csi_measconfig->csi_ReportConfigToAddModList->list.array[i];
+    if (report_config->resourcesForChannelMeasurement != csi_res_id)
+      continue;
+    NR_CodebookConfig_t *cbc = report_config->codebookConfig;
+    if (cbc && cbc->codebookType.present == NR_CodebookConfig__codebookType_PR_type1 && cbc->codebookType.choice.type1
+        && cbc->codebookType.choice.type1->subType.present == NR_CodebookConfig__codebookType__type1__subType_PR_typeI_SinglePanel
+        && cbc->codebookType.choice.type1->subType.choice.typeI_SinglePanel
+        && cbc->codebookType.choice.type1->subType.choice.typeI_SinglePanel->typeI_SinglePanel_ri_Restriction.buf)
+      return cbc->codebookType.choice.type1->subType.choice.typeI_SinglePanel->typeI_SinglePanel_ri_Restriction.buf[0];
+  }
+  return 0;
+}
+
 static void nr_schedule_csirs_reception(NR_UE_MAC_INST_t *mac, int frame, int slot)
 {
   if (!mac->sc_info.csi_MeasConfig)
@@ -1227,6 +1248,7 @@ static void nr_schedule_csirs_reception(NR_UE_MAC_INST_t *mac, int frame, int sl
     LOG_D(MAC,"Scheduling reception of CSI-RS in frame %d slot %d\n", frame, slot);
     fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu = &dl_config->dl_config_list[dl_config->number_pdus].csirs_config_pdu.csirs_config_rel15;
     csirs_config_pdu->measurement_bitmap = set_csirs_measurement_bitmap(csi_measconfig, csi_res_id);
+    csirs_config_pdu->ri_restriction = get_csirs_ri_restriction(csi_measconfig, csi_res_id);
     csirs_config_pdu->subcarrier_spacing = mu;
     csirs_config_pdu->cyclic_prefix = current_DL_BWP->cyclicprefix ? *current_DL_BWP->cyclicprefix : 0;
 
