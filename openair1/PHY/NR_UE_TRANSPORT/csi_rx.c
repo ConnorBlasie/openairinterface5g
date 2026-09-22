@@ -23,6 +23,11 @@
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "common/utils/nr/nr_common.h"
 #include "PHY/NR_UE_ESTIMATION/filt16a_32.h"
+#include "nr_csi_rank_utils.h"
+
+// Per-dimension relative eigenvalue floor for the NxN effective-rank test (nb_rx>=3).
+// 0.1 separates ranks 1..4 while rejecting ~1e-3 noise eigenvalues.
+#define NR_CSI_RANK_EPS 0.1
 
 //#define NR_CSIRS_DEBUG
 //#define NR_CSIIM_DEBUG
@@ -551,6 +556,67 @@ static int nr_csi_rs_ri_estimation_2(int nb_antennas_rx,
   }
 }
 
+// Effective-rank RI estimation for nb_rx >= 3 (enables RI 3/4). Builds the rx x rx Hermitian Gram
+// A = H*H^H (contract over ports), band-averaged over all CSI-RS REs in double precision (this runs
+// once per report, so float is cheap and avoids the int64 overflow a fixed-point 4x4 determinant
+// would hit). Effective rank = # significant eigenvalues, via nr_csi_effective_rank() (leading
+// principal minors). Returns rank_indicator (0-based: 0 => rank 1), clamped to <= N_ports.
+static uint8_t nr_csi_rs_ri_estimation_n(int nb_antennas_rx,
+                                         int N_ports,
+                                         int ofdm_sz,
+                                         const c16_t ch_freq[][N_ports][ofdm_sz],
+                                         int start_rb,
+                                         int nr_of_rbs,
+                                         int freq_density)
+{
+  const int N = nb_antennas_rx <= NR_CSI_RANK_MAX_N ? nb_antennas_rx : NR_CSI_RANK_MAX_N;
+  double _Complex A[NR_CSI_RANK_MAX_N][NR_CSI_RANK_MAX_N] = {{0}};
+  long nre = 0;
+  for (int rb = start_rb; rb < start_rb + nr_of_rbs; rb++) {
+    if (freq_density <= 1 && freq_density != (rb % 2))
+      continue;
+    const uint16_t k = rb * NR_NB_SC_PER_RB;
+    for (int a = 0; a < N; a++)
+      for (int b = 0; b < N; b++) {
+        double re = 0, im = 0;
+        for (int p = 0; p < N_ports; p++) {
+          const c16_t ha = ch_freq[a][p][k];
+          const c16_t hb = ch_freq[b][p][k];
+          // A[a][b] += conj(ha) * hb  (Gram over ports)
+          re += (double)ha.r * hb.r + (double)ha.i * hb.i;
+          im += (double)ha.r * hb.i - (double)ha.i * hb.r;
+        }
+        A[a][b] += re + im * I;
+      }
+    nre++;
+  }
+  if (nre == 0)
+    return 0; // no REs found; report rank 1
+
+  int rank = nr_csi_effective_rank(A, N, NR_CSI_RANK_EPS);
+  if (N_ports < rank)
+    rank = N_ports; // rank <= min(N_ports, nb_rx)
+#ifdef NR_CSIRS_DEBUG
+  LOG_I(NR_PHY, "RI(NxN): nb_rx=%d N_ports=%d -> rank=%d\n", nb_antennas_rx, N_ports, rank);
+#endif
+  return (uint8_t)(rank - 1);
+}
+
+// Clamp the estimated rank indicator (0-based: 0=>rank1) to the gNB-signaled
+// typeI-SinglePanel-ri-Restriction bitmap (TS 38.214 5.2.2.2.1): bit k set => rank (k+1) allowed.
+// The UE shall not report a rank whose bit is 0, so drop to the highest allowed rank <= estimate.
+// ri_restriction == 0 means no CodebookConfig was signaled -> leave the estimate unchanged.
+static uint8_t nr_csi_clamp_ri_to_restriction(uint8_t rank_indicator, uint8_t ri_restriction)
+{
+  if (ri_restriction == 0 || (ri_restriction & (1 << rank_indicator)))
+    return rank_indicator; // no restriction, or the estimated rank is allowed
+  for (int r = rank_indicator - 1; r >= 0; r--) {
+    if (ri_restriction & (1 << r))
+      return (uint8_t)r;
+  }
+  return 0; // fallback: rank 1 (bit 0) if nothing else set
+}
+
 static int nr_csi_rs_ri_estimation(const PHY_VARS_NR_UE *ue,
                                    const fapi_nr_dl_config_csirs_pdu_rel15_t *csirs_config_pdu,
                                    const uint8_t N_ports,
@@ -559,22 +625,38 @@ static int nr_csi_rs_ri_estimation(const PHY_VARS_NR_UE *ue,
 {
   const NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int max_rank = min(fp->nb_antennas_rx, N_ports);
+  uint8_t rank_indicator;
   switch (max_rank) {
     case 1:
-      return 0;
+      rank_indicator = 0;
+      break;
     case 2:
-      return nr_csi_rs_ri_estimation_2(fp->nb_antennas_rx,
-                                       N_ports,
-                                       fp->ofdm_symbol_size,
-                                       csi_rs_estimated_channel_freq,
-                                       csirs_config_pdu->start_rb,
-                                       csirs_config_pdu->nr_of_rbs,
-                                       csirs_config_pdu->freq_density,
-                                       log2_maxh);
+      rank_indicator = nr_csi_rs_ri_estimation_2(fp->nb_antennas_rx,
+                                                 N_ports,
+                                                 fp->ofdm_symbol_size,
+                                                 csi_rs_estimated_channel_freq,
+                                                 csirs_config_pdu->start_rb,
+                                                 csirs_config_pdu->nr_of_rbs,
+                                                 csirs_config_pdu->freq_density,
+                                                 log2_maxh);
+      break;
+    case 3:
+    case 4:
+      rank_indicator = nr_csi_rs_ri_estimation_n(fp->nb_antennas_rx,
+                                                 N_ports,
+                                                 fp->ofdm_symbol_size,
+                                                 csi_rs_estimated_channel_freq,
+                                                 csirs_config_pdu->start_rb,
+                                                 csirs_config_pdu->nr_of_rbs,
+                                                 csirs_config_pdu->freq_density);
+      break;
     default:
       LOG_W(NR_PHY, "Rank indicator computation is not implemented for %i x %i system\n", fp->nb_antennas_rx, N_ports);
-      return 0;
+      rank_indicator = 0;
   }
+  // Honor the gNB-signaled typeI-SinglePanel-ri-Restriction (TS 38.214 5.2.2.2.1): the UE shall not
+  // report a rank whose bit is 0. Clamp down to the highest allowed rank.
+  return nr_csi_clamp_ri_to_restriction(rank_indicator, csirs_config_pdu->ri_restriction);
 }
 
 // Type1 Single Panel PMI indices (TS 38.214 Section 5.2.2.2.1).
@@ -716,7 +798,7 @@ static void nr_csi_rs_pmi_4ports(int nb_antennas_rx,
                                  csi_rs_pmi_t *pmi,
                                  int32_t *precoded_sinr_dB)
 {
-  if (rank_indicator > 1) {
+  if (rank_indicator > 3) {
     LOG_W(NR_PHY, "PMI not implemented for 4 ports and rank %d\n", rank_indicator + 1);
     return;
   }
@@ -772,7 +854,7 @@ static void nr_csi_rs_pmi_4ports(int nb_antennas_rx,
         }
       }
     }
-  } else {
+  } else if (rank_indicator == 1) {
     // Rank 2, Table 5.2.2.2.1-6: 32 entries indexed by (l, i13, n). l' = (l + 4*i13) mod 8.
     // trace(W^H R W) = (1/8)[A_l + A_l' + B_l + B_l' + 2*Re(phi_n*(D_l - D_l'))]
     for (int l = 0; l < 8; l++)
@@ -792,9 +874,46 @@ static void nr_csi_rs_pmi_4ports(int nb_antennas_rx,
           }
         }
       }
+  } else if (rank_indicator == 2) {
+    // Rank 3, Table 5.2.2.2.1-7. N1=2,N2=1 has a single valid beam-pair offset k1 = O1 = 4
+    // (Table 5.2.2.2.1-4), so the second beam v_b is fixed to v_{(l+4) mod 8}; only i11=l and the
+    // 1-bit co-phase i2 (phi in {1,j}) are reported (i12=i13=0, matching pmi_i13_bitlen for rank 3/4).
+    // Layers: L0=[v_l;phi v_l], L1=[v_b;phi v_b], L2=[v_l;-phi v_l].
+    // trace(W^H R W) = 2*(A_l+B_l) + (A_b+B_b) + 2*Re(phi*D_b)   [L0+L2 cancel the phi cross term on
+    // v_l, leaving only v_b's cross term from L1]
+    for (int l = 0; l < 8; l++) {
+      const int lp = (l + 4) & 7;
+      const int64_t AB_l = A[l] + B[l];
+      const int64_t AB_lp = A[lp] + B[lp];
+      for (int n = 0; n < 2; n++) {
+        int64_t cross = (int64_t)phi_r[n] * D[lp].r - (int64_t)phi_i[n] * D[lp].i;
+        int64_t m = 2 * AB_l + AB_lp + 2 * cross;
+        if (m > best) {
+          best = m;
+          pmi->i_1_1 = l;
+          pmi->i_2 = n;
+          best_signal = m;
+        }
+      }
+    }
+  } else {
+    // Rank 4, Table 5.2.2.2.1-8: adds L3=[v_b;-phi v_b], so L1+L3 also cancel their phi cross term
+    // and the captured power becomes phi-invariant: trace(W^H R W) = 2*(A_l+B_l) + 2*(A_b+B_b).
+    // i2 does not affect the energy criterion here; report i2=0 and search only over the beam l.
+    for (int l = 0; l < 8; l++) {
+      const int lp = (l + 4) & 7;
+      int64_t m = 2 * (A[l] + B[l]) + 2 * (A[lp] + B[lp]);
+      if (m > best) {
+        best = m;
+        pmi->i_1_1 = l;
+        pmi->i_2 = 0;
+        best_signal = m;
+      }
+    }
   }
   // Average signal power per RE = best / (4 * Q^2 * num_REs)  [rank 1]
-  // For rank 2 the (1/8) cancels in best, but we keep the (1/4) here for SINR consistency.
+  // For rank 2/3/4 the extra (1/2), (1/8) etc. factors cancel in best (argmax is scale-invariant), but
+  // we keep the rank-1 (1/4) divisor here for SINR consistency across ranks (same convention as rank 2).
   int64_t signal_power = best_signal / (4LL * PMI_Q * PMI_Q * num_h_vectors);
   *precoded_sinr_dB = dB_fixed(signal_power) - dB_fixed(noise);
 
