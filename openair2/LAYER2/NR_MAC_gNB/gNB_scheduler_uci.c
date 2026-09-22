@@ -824,6 +824,13 @@ static void extract_pucch_csi_report(NR_CSI_MeasConfig_t *csi_MeasConfig,
             if (ri_bitlen) {
               skip_zero_padding(&cumul_bits, csi_report, r_index, bitlen);
               pmi_bitlen = evaluate_pmi_report(payload, csi_report, cumul_bits, r_index, sched_ctrl);
+            } else if (csi_report->csi_meas_bitlen.pmi_x1_bitlen[r_index] + csi_report->csi_meas_bitlen.pmi_x2_bitlen[r_index]
+                       > 0) {
+              // Fixed rank (ri_bitlen == 0, e.g. maxMIMO_layers == 1) but the codebook still
+              // carries a PMI field (2-port rank 1, or >2-port rank 1). With a single allowed
+              // rank there is exactly one report size, so max_bitlen == reported_bitlen and the
+              // zero-padding region has width 0 -> skip_zero_padding() is a no-op and is omitted.
+              pmi_bitlen = evaluate_pmi_report(payload, csi_report, cumul_bits, r_index, sched_ctrl);
             }
             sched_ctrl->CSI_report.cri_ri_li_pmi_cqi_report.csi_report_id = csi_report_id;
             cumul_bits += pmi_bitlen;
@@ -843,6 +850,11 @@ static void extract_pucch_csi_report(NR_CSI_MeasConfig_t *csi_MeasConfig,
             cumul_bits += li_bitlen;
             if (ri_bitlen) {
               skip_zero_padding(&cumul_bits, csi_report, r_index, bitlen);
+              pmi_bitlen = evaluate_pmi_report(payload, csi_report, cumul_bits, r_index, sched_ctrl);
+            } else if (csi_report->csi_meas_bitlen.pmi_x1_bitlen[r_index] + csi_report->csi_meas_bitlen.pmi_x2_bitlen[r_index]
+                       > 0) {
+              // Fixed rank (ri_bitlen == 0) with a non-empty PMI field: single allowed rank means
+              // zero-padding width is 0, so skip_zero_padding() is a no-op and is omitted.
               pmi_bitlen = evaluate_pmi_report(payload, csi_report, cumul_bits, r_index, sched_ctrl);
             }
             sched_ctrl->CSI_report.cri_ri_li_pmi_cqi_report.csi_report_id = csi_report_id;
