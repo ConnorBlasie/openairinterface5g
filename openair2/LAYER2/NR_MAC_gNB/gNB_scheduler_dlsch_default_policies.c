@@ -64,6 +64,20 @@ int nr_dl_tda_select_default(const gNB_MAC_INST *mac, const nr_cell_sched_t *cel
     NR_UE_sched_ctrl_t *sched_ctrl = &UE->UE_sched_ctrl;
     NR_UE_DL_BWP_t *dl_bwp = &UE->current_DL_BWP;
     int coresetid = sched_ctrl->coreset->controlResourceSetId;
+
+    /* For HARQ retransmissions: reuse the EXACT TDA from the original transmission
+     * to guarantee TBS remains identical. Changing TDA changes the number of symbols,
+     * which changes TBS even if MCS/RB-size are preserved, causing UE-side HARQ errors. */
+    if (cand->is_retx) {
+      const NR_sched_pdsch_t *orig = &sched_ctrl->harq_processes[cand->retx_harq_pid].sched_pdsch;
+      cand->sched_pdsch.time_domain_allocation = orig->time_domain_allocation;
+      cand->sched_pdsch.tda_info = orig->tda_info;
+      cand->alloc_slbitmap = SL_to_bitmap(orig->tda_info.startSymbolIndex, orig->tda_info.nrOfSymbols);
+      n_valid++;
+      continue;
+    }
+
+    /* For new transmissions: select TDA based on current slot */
     NR_tda_info_t tda_info = get_dl_tda_info(dl_bwp,
                                              sched_ctrl->search_space->searchSpaceType->present,
                                              tda,
@@ -75,21 +89,6 @@ int nr_dl_tda_select_default(const gNB_MAC_INST *mac, const nr_cell_sched_t *cel
     if (!tda_info.valid_tda) {
       cand->skipped = true;
       continue;
-    }
-
-    /* For retransmissions with a changed TDA, refit rbSize to preserve TBS */
-    if (cand->is_retx) {
-      const NR_sched_pdsch_t *orig = &sched_ctrl->harq_processes[cand->retx_harq_pid].sched_pdsch;
-      bool tda_changed =
-          tda_info.startSymbolIndex != orig->tda_info.startSymbolIndex || tda_info.nrOfSymbols != orig->tda_info.nrOfSymbols;
-      if (tda_changed) {
-        uint16_t new_rbSize = check_dl_retx_feasibility(cand, tda, &tda_info, scc, dl_bwp->BWPSize);
-        if (!new_rbSize) {
-          cand->skipped = true;
-          continue;
-        }
-        cand->retx_rbSize = new_rbSize;
-      }
     }
 
     cand->sched_pdsch.time_domain_allocation = tda;
