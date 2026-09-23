@@ -56,6 +56,7 @@
 #define MACRLC_STATS_MAX_UE                  "stats_max_ue"
 #define MACRLC_SPATIAL_STREAM_IDX            "spatial_stream_index"
 #define MACRLC_AOA_NB_BEAMS "aoa_nb_beams"
+#define MACRLC_AOA_BEAM_ANGLES "aoa_beam_angles"
 
 #define HLP_MACRLC_UL_PRBBLACK "SNR threshold to decide whether a PRB will be blacklisted or not"
 #define HLP_MACRLC_DL_BLER_UP "Upper threshold of BLER to decrease DL MCS"
@@ -80,7 +81,11 @@
 #define HLP_MACRLC_SPATIAL_STREAM_INDEX "Array of RU antenna ports / eAxCIDs to be used by L1. This may only be applicable for MU-MIMO. Value range [0, 15]"
 #define HLP_MACRLC_AOA_NB_BEAMS                                                                                                  \
   "Number of O-RU codebook beams for AoA-driven beam selection (0=disabled). Must match the O-RU codebook_nb_beams; beams tile " \
-  "[-90,90] in equal sectors."
+  "[-90,90] in equal sectors unless aoa_beam_angles is set."
+#define HLP_MACRLC_AOA_BEAM_ANGLES                                                                                      \
+  "Optional per-codebook-beam pointing angle in degrees, indexed like beam_weights (e.g. [0,15,-15]). When its length " \
+  "equals aoa_nb_beams, nearest-angle selection is used instead of uniform [-90,90] sector tiling -- needed for "       \
+  "non-uniformly/narrowly spaced beam layouts."
 
 /*-------------------------------------------------------------------------------------------------------------------------------------------------------*/
 /*                                            MacRLC  configuration parameters                                                                           */
@@ -132,6 +137,8 @@
   {MACRLC_SPATIAL_STREAM_IDX,          HLP_MACRLC_SPATIAL_STREAM_INDEX, \
                                                                                0, .uptr=NULL,   .defintarrayval=0,          TYPE_INTARRAY,0}, \
   {MACRLC_AOA_NB_BEAMS,                HLP_MACRLC_AOA_NB_BEAMS,  0, .u8ptr=NULL,  .defintval=0,               TYPE_UINT8,   0}, \
+  {MACRLC_AOA_BEAM_ANGLES,             HLP_MACRLC_AOA_BEAM_ANGLES, \
+                                                                               0, .iptr=NULL,   .defintarrayval=0,          TYPE_INTARRAY,0}, \
 }
 // clang-format off
 
@@ -180,6 +187,7 @@
   { .s5 = { NULL } }, \
   { .s2 = { NULL } }, /* Spatial stream index */ \
   { .s2 = { config_check_intrange, {0, 64} } }, /* aoa_nb_beams: 0=disabled..64 codebook beams */ \
+  { .s2 = { NULL } }, /* aoa_beam_angles */ \
 }
 
 /*---------------------------------------------------------------------------------------------------------------------------------------------------------*/

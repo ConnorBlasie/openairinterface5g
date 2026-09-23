@@ -1848,6 +1848,19 @@ void RCconfig_nr_macrlc(configmodule_interface_t *cfg, nr_cell_sched_t **out_cel
       // O-RU codebook_nb_beams. Used to gate aoa_selection_procedures / handle_nr_srs_measurements.
       cell->radio_config.aoa_nb_beams = *gpd(params, np, MACRLC_AOA_NB_BEAMS)->u8ptr;
 
+      // Optional per-codebook-beam pointing angles (indexed like beam_weights), for non-uniform
+      // beam layouts -- see aoa_beam_angles doc comment in nr_mac_gNB.h.
+      {
+        int n_angles = gpd(params, np, MACRLC_AOA_BEAM_ANGLES)->numelt;
+        cell->radio_config.num_aoa_beam_angles = n_angles;
+        cell->radio_config.aoa_beam_angles = NULL;
+        if (n_angles > 0) {
+          cell->radio_config.aoa_beam_angles = calloc_or_fail(n_angles, sizeof(*cell->radio_config.aoa_beam_angles));
+          for (int b = 0; b < n_angles; b++)
+            cell->radio_config.aoa_beam_angles[b] = gpd(params, np, MACRLC_AOA_BEAM_ANGLES)->iptr[b];
+        }
+      }
+
       // triggers also PHY initialization in case we have L1 via FAPI
       nr_mac_config_scc(nrmac, cell, scc, &config);
       RC.nrmac[j]->positioning_config = RCconfig_nr_positioning();
