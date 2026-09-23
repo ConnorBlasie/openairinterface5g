@@ -4103,27 +4103,60 @@ int aoa_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE, double aoa
   if (num_ssb <= 1)
     return -1; // only one beam -> nothing to steer
 
-  const double step = 180.0 / (double)num_ssb; // sector width per SSB beam
-  int beam = (int)floor((aoa_deg + 90.0) / step);
-  if (beam < 0)
-    beam = 0;
-  if (beam >= num_ssb)
-    beam = num_ssb - 1;
-
   const int cur = UE->UE_beam_index;
-  if (beam == cur) {
-    UE->aoa_codebook_beam = (uint16_t)beam; // keep data-beam mirror in sync
-    return -1; // already on this beam
+  int beam;
+  bool switch_now;
+  double margin_deg;
+
+  if (cell->radio_config.num_aoa_beam_angles == num_ssb) {
+    // NEAREST-ANGLE mode: pick the configured beam pointing angle closest to the estimate. Unlike
+    // uniform tiling below, this works for arbitrary (non-uniform) real codebook layouts -- e.g.
+    // beams clustered near boresight (0, +15, -15 deg) rather than spread evenly across
+    // [-90,90] (which would blur three such beams into a single ~60-deg sector and never
+    // distinguish +15 from -15).
+    const int *angles = cell->radio_config.aoa_beam_angles;
+    double best_dist = INFINITY;
+    beam = 0;
+    for (int b = 0; b < num_ssb; b++) {
+      const double d = fabs(aoa_deg - angles[b]);
+      if (d < best_dist) {
+        best_dist = d;
+        beam = b;
+      }
+    }
+    if (beam == cur) {
+      UE->aoa_codebook_beam = (uint16_t)beam;
+      return -1;
+    }
+    // HYSTERESIS: only switch if clearly closer to the candidate beam than to the current one --
+    // a fixed degree margin (not sector-relative, since sectors aren't uniform here).
+    const double cur_dist = fabs(aoa_deg - angles[cur]);
+    margin_deg = 3.0; // require >=3 deg clearer fit to the new beam before switching
+    switch_now = (cur_dist - best_dist) >= margin_deg;
+  } else {
+    // UNIFORM-TILING mode (default, no aoa_beam_angles configured): assume beams are spread evenly
+    // across [-90,90], one sector per SSB.
+    const double step = 180.0 / (double)num_ssb; // sector width per SSB beam
+    beam = (int)floor((aoa_deg + 90.0) / step);
+    if (beam < 0)
+      beam = 0;
+    if (beam >= num_ssb)
+      beam = num_ssb - 1;
+    if (beam == cur) {
+      UE->aoa_codebook_beam = (uint16_t)beam;
+      return -1;
+    }
+    // HYSTERESIS: only switch if the estimate is clearly inside the new sector (past its center),
+    // not merely across the boundary. Prevents 0<->1 flapping when the UE sits near a boundary.
+    const double sector_center = -90.0 + (beam + 0.5) * step;
+    // Production margin: 0.25 -> dead zone +-22.5 deg (2 SSB), well above typical AoA estimator
+    // jitter, so a stationary UE near a boundary does NOT flap. Sparse switches -> no reconnect
+    // churn. Lower only for a deliberate flapping demo.
+    margin_deg = step * 0.25;
+    switch_now = fabs(aoa_deg - sector_center) <= (step * 0.5 - margin_deg);
   }
 
-  // HYSTERESIS: only switch if the estimate is clearly inside the new sector (past its center),
-  // not merely across the boundary. Prevents 0<->1 flapping when the UE sits near a boundary.
-  const double sector_center = -90.0 + (beam + 0.5) * step;
-  // Production margin: 0.25 -> dead zone +-22.5 deg (2 SSB), well above typical AoA estimator
-  // jitter, so a stationary UE near a boundary does NOT flap. Sparse switches -> no reconnect churn.
-  // Lower only for a deliberate flapping demo.
-  const double margin = step * 0.25;
-  if (fabs(aoa_deg - sector_center) > (step * 0.5 - margin)) {
+  if (!switch_now) {
     LOG_D(NR_MAC, "[UE %04x] AoA-beam: %.1f deg near boundary of SSB beam %d, holding beam %d\n", UE->rnti, aoa_deg, beam, cur);
     return -1;
   }
