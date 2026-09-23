@@ -1356,14 +1356,25 @@ void write_prach_iq(void *context, uint32_t **txdataF, int nb_rx, int frame, int
       continue;
     }
     prach_job_t *job = &ctx->prach_jobs[slot_in_frame][aarx];
-    if (!job->active || target_absolute_symbol < job->start_absolute_symbol
-        || target_absolute_symbol >= job->start_absolute_symbol + job->num_symbols) {
+    // Frame-wrap tolerance: the C-plane job's start_absolute_symbol and this U-plane's
+    // target_absolute_symbol are each derived as current_absolute_symbol + a half-frame-wrapped
+    // diff, computed at slightly different current_absolute_symbol times. Near a frame boundary the
+    // two wraps can resolve one whole frame (num_symbols_per_frame) apart, so the raw comparison
+    // rejected a valid PRACH as "Stale" by ~1 frame. Normalize the relative offset modulo one frame
+    // into [-half,+half) before the early/valid/stale test (jobs are keyed by slot-in-frame, so
+    // frame identity isn't tracked here).
+    int64_t rel = (int64_t)target_absolute_symbol - (int64_t)job->start_absolute_symbol;
+    if (rel < -num_symbols_per_frame / 2)
+      rel += num_symbols_per_frame;
+    else if (rel >= num_symbols_per_frame / 2)
+      rel -= num_symbols_per_frame;
+    if (!job->active || rel < 0 || rel >= (int64_t)job->num_symbols) {
       ctx->thread_safe_stats.prach_cplane_missing++;
       if (!job->active) {
         ctx->thread_safe_stats.prach_cplane_missing_inactive++;
         RATELIMIT(PRACH_ERR_LOG_RATELIMIT,
                   { LOG_W(HW, "PRACH UP: Missing C-Plane - Inactive job for slot %d, aarx %d\n", slot_in_frame, aarx); });
-      } else if (target_absolute_symbol < job->start_absolute_symbol) {
+      } else if (rel < 0) {
         ctx->thread_safe_stats.prach_cplane_missing_early++;
         RATELIMIT(PRACH_ERR_LOG_RATELIMIT, {
           LOG_W(HW,
