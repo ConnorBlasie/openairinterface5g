@@ -967,6 +967,10 @@ void ue_context_modification_confirm(const f1ap_ue_context_modif_confirm_t *conf
   if (UE->cm_info.trigger_info == BEAM_SWITCH) {
     LOG_I(NR_MAC, "[UE %x] Switching to beam with ID %d (from %d)\n", UE->rnti, UE->cm_info.new_state, UE->UE_beam_index);
     UE->UE_beam_index = UE->cm_info.new_state;
+    // AoA loop: keep the data-beam mirror in sync with the confirmed SSB beam unless AoA has already
+    // steered it elsewhere for this same target (aoa_selection_procedures sets aoa_codebook_beam
+    // immediately, ahead of this confirm, when it is the one driving the switch).
+    UE->aoa_codebook_beam = UE->UE_beam_index;
   } else if (UE->cm_info.trigger_info == BWP_SWITCH)
     UE->local_bwp_id = UE->cm_info.new_state;
   UE->cm_info.trigger_info = NO_TRIGGER;

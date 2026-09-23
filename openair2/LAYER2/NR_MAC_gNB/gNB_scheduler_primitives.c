@@ -1719,7 +1719,8 @@ void nr_configure_pucch(nfapi_nr_pucch_pdu_t *pucch_pdu,
   pucch_pdu->beamforming.num_prgs = 1;
   pucch_pdu->beamforming.prg_size = pucch_pdu->prb_size;
   pucch_pdu->beamforming.dig_bf_interface = 1;
-  const uint16_t fapi_beam = convert_to_fapi_beam(UE->UE_beam_index, beam_mode);
+  // AoA loop: UL PUCCH rides the AoA-selected codebook beam (decoupled from SSB UE_beam_index).
+  const uint16_t fapi_beam = convert_to_fapi_beam(UE->aoa_codebook_beam, beam_mode);
   pucch_pdu->beamforming.prgs_list[0].dig_bf_interface_list[0].beam_idx = fapi_beam;
   pucch_pdu->param_v4.numSpatialStreamIndices = num_ant;
   for (int i = 0; i < num_ant; i++)
@@ -3479,7 +3480,21 @@ void nr_csirs_scheduling(gNB_MAC_INST *gNB_mac, nr_cell_sched_t *cell, frame_t f
 
           LOG_D(NR_MAC,"Scheduling CSI-RS in frame %d slot %d Resource ID %ld\n", frame, slot, nzpcsi->nzp_CSI_RS_ResourceId);
           NR_beam_alloc_t beam_csi = beam_allocation_procedure(&cell->beam_info, frame, slot, UE->UE_beam_index, n_slots_frame);
-          AssertFatal(beam_csi.idx >= 0, "Cannot allocate CSI-RS in any available beam\n");
+          // With multiple SSB beams time-multiplexed under beams_per_period, this CSI-RS occasion's
+          // slot may already be committed to a different beam (beam_allocation returns idx < 0). That
+          // is not a fatal error: skip THIS occasion and let the periodic CSI-RS retry next period,
+          // when the slot is free for the UE's beam. (Was AssertFatal, which crashed the gNB under
+          // multi-SSB.) The UE's beam (UE_beam_index) and its data still ride the same beam - no QCL
+          // impact; only the CSI measurement is occasionally sparser.
+          if (beam_csi.idx < 0) {
+            LOG_D(NR_MAC,
+                  "%d.%d CSI-RS for UE %04x beam %d: no free beam slot this period, skipping\n",
+                  frame,
+                  slot,
+                  UE->rnti,
+                  UE->UE_beam_index);
+            continue;
+          }
           uint16_t *vrb_map = cell->common_channels.vrb_map[beam_csi.idx];
           UE_info->sched_csirs |= (1 << dl_bwp->bwp_id);
 
@@ -3493,7 +3508,9 @@ void nr_csirs_scheduling(gNB_MAC_INST *gNB_mac, nr_cell_sched_t *cell, frame_t f
           csirs_pdu_rel15->precodingAndBeamforming.prg_size = resourceMapping.freqBand.nrofRBs; //1 PRG of max size
           csirs_pdu_rel15->precodingAndBeamforming.dig_bf_interfaces = 1;
           csirs_pdu_rel15->precodingAndBeamforming.prgs_list[0].pm_idx = 0;
-          const uint16_t fapi_beam = convert_to_fapi_beam(UE->UE_beam_index, cell->beam_info.beam_mode);
+          // AoA loop: CSI-RS rides the AoA-selected codebook beam so the UE's CSI feedback reflects
+          // reception on that beam (closes the estimate->select->apply->confirm loop).
+          const uint16_t fapi_beam = convert_to_fapi_beam(UE->aoa_codebook_beam, cell->beam_info.beam_mode);
           // TODO: set correctly dig_bf_interface_list when ports of same CDM group is used and PMI if used.
           csirs_pdu_rel15->precodingAndBeamforming.prgs_list[0].dig_bf_interface_list[0].beam_idx = fapi_beam;
           const nr_pdsch_AntennaPorts_t *p = &cell->radio_config.pdsch_AntennaPorts;
@@ -3817,6 +3834,7 @@ void beam_switching_procedure(gNB_MAC_INST *mac, nr_cell_sched_t *cell, NR_UE_in
   else {
     LOG_I(NR_MAC, "[UE %x] Switching to beam with ID %d (from %d)\n", UE->rnti, new_beam_index, UE->UE_beam_index);
     UE->UE_beam_index = new_beam_index;
+    UE->aoa_codebook_beam = new_beam_index; // AoA loop: keep the data-beam mirror in sync
   }
 }
 
@@ -4057,6 +4075,62 @@ int beam_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE)
   tci->coresetId = sched_ctrl->coreset->controlResourceSetId;
   tci->tciStateId = new_bf_index; // assumption: this correspond to the TCI index
   return -1;  // no beam change now in case of TCI
+}
+
+/* AoA-driven analog beam selection (sibling of beam_selection_procedures, which uses SSB RSRP).
+ * Maps an estimated azimuth AoA to the SSB beam (UE_beam_index) whose sector contains the angle, so
+ * that SSB + PDSCH + PDCCH + CSI-RS all ride the SAME AoA-selected beam (standards-correct: no
+ * QCL-Type-D inconsistency between the SSB the UE tracks and the data it decodes). Returns the new
+ * SSB-beam index to switch to (0..num_active_ssb-1), or -1 for "no change". The AoA is estimated at
+ * the gNB from the SRS per-antenna channel (nr_srs_estimate_aoa) and this is called from
+ * handle_nr_srs_measurements - i.e. connected-mode refinement AFTER initial RSRP-based acquisition.
+ *
+ * @param aoa_deg   estimated azimuth AoA in [-90,90] (from the SRS estimator, via the caller)
+ *
+ * The beam count is the number of TRANSMITTED SSB beams (num_active_ssb) - each SSB is one steering
+ * direction - NOT the O-RU codebook size. AoA tiles [-90,90] into num_active_ssb equal sectors and
+ * selects the SSB beam for its sector; the caller drives UE_beam_index via beam_switching_procedure.
+ * Hysteresis: only switch when the angle is past the sector center by a margin, so a UE near a sector
+ * boundary does not flap UE_beam_index (each switch triggers an F1 reconfiguration when do_CSIRS). */
+int aoa_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE, double aoa_deg)
+{
+  if (cell->beam_info.beam_mode == NO_BEAM_MODE)
+    return -1;
+
+  // Number of steering directions = number of transmitted SSB beams. UE_beam_index must stay in
+  // [0, num_active_ssb) so ssb_index[UE_beam_index] is always valid (no non-existent-SSB indexing).
+  const int num_ssb = cell->common_channels.num_active_ssb;
+  if (num_ssb <= 1)
+    return -1; // only one beam -> nothing to steer
+
+  const double step = 180.0 / (double)num_ssb; // sector width per SSB beam
+  int beam = (int)floor((aoa_deg + 90.0) / step);
+  if (beam < 0)
+    beam = 0;
+  if (beam >= num_ssb)
+    beam = num_ssb - 1;
+
+  const int cur = UE->UE_beam_index;
+  if (beam == cur) {
+    UE->aoa_codebook_beam = (uint16_t)beam; // keep data-beam mirror in sync
+    return -1; // already on this beam
+  }
+
+  // HYSTERESIS: only switch if the estimate is clearly inside the new sector (past its center),
+  // not merely across the boundary. Prevents 0<->1 flapping when the UE sits near a boundary.
+  const double sector_center = -90.0 + (beam + 0.5) * step;
+  // Production margin: 0.25 -> dead zone +-22.5 deg (2 SSB), well above typical AoA estimator
+  // jitter, so a stationary UE near a boundary does NOT flap. Sparse switches -> no reconnect churn.
+  // Lower only for a deliberate flapping demo.
+  const double margin = step * 0.25;
+  if (fabs(aoa_deg - sector_center) > (step * 0.5 - margin)) {
+    LOG_D(NR_MAC, "[UE %04x] AoA-beam: %.1f deg near boundary of SSB beam %d, holding beam %d\n", UE->rnti, aoa_deg, beam, cur);
+    return -1;
+  }
+
+  LOG_I(NR_MAC, "[UE %04x] AoA-beam: AoA=%.1f deg -> SSB beam %d (cur %d, num_ssb=%d)\n", UE->rnti, aoa_deg, beam, cur, num_ssb);
+  UE->aoa_codebook_beam = (uint16_t)beam; // data beam mirrors the SSB beam (same beam, no QCL hole)
+  return beam;
 }
 
 void send_initial_ul_rrc_message(int rnti, const uint8_t *sdu, sdu_size_t sdu_len, void *data)

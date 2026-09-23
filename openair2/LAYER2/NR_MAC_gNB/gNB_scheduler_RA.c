@@ -807,6 +807,9 @@ void nr_initiate_ra_proc(module_id_t module_idP,
   // return current SSB order in the list of tranmitted SSBs
   int n_ssb = ssb_index_from_prach(cell, frame, slot, preamble_index, freq_index, symbol);
   UE->UE_beam_index = get_beam_from_ssbidx(cell, cc->ssb_index[n_ssb]);
+  // AoA loop: initialize the data-beam mirror to the SSB beam so PDSCH/PUCCH/CSI-RS/PUSCH ride the
+  // same beam as SSB until the first SRS-AoA estimate (or RSRP switch) updates it.
+  UE->aoa_codebook_beam = UE->UE_beam_index;
   LOG_I(NR_MAC, "UE %04x: Sync beam index %d\n", UE->rnti, UE->UE_beam_index);
 
   // Configure RA BWP
