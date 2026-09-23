@@ -188,8 +188,8 @@ void nr_srs_ri_computation(const nfapi_nr_srs_normalized_channel_iq_matrix_t *nr
                            const NR_UE_UL_BWP_t *current_BWP,
                            uint8_t *ul_ri);
 
-/* Phase-slope azimuth AoA (deg, [-90,90]) from the SRS per-antenna channel; NAN if no aperture. */
-double nr_srs_estimate_aoa(const nfapi_nr_srs_normalized_channel_iq_matrix_t *m);
+/* nr_srs_estimate_aoa() is a static inline in nr_srs_aoa.h (self-contained, unit-testable in
+ * isolation) - callers include that header directly rather than declaring it here. */
 
 int get_pucch_resourceid(NR_PUCCH_Config_t *pucch_Config, int O_uci, int pucch_resource);
 

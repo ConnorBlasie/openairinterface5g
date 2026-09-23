@@ -11,6 +11,7 @@
 #include <softmodem-common.h>
 #include "NR_MAC_gNB/nr_mac_gNB.h"
 #include "NR_MAC_gNB/mac_proto.h"
+#include "NR_MAC_gNB/nr_srs_aoa.h"
 #include "common/ran_context.h"
 #include "nfapi/oai_integration/vendor_ext.h"
 #include "common/utils/nr/nr_common.h"
@@ -180,69 +181,6 @@ void matrix_rank_128bits(int row, int col, simde__m128i mat[4])
   } else {
     AssertFatal(1 == 0, "matrix_rank_128bits() function is not implemented for row = %i and col = %i\n", row, col);
   }
-}
-
-/* Phase-slope azimuth AoA (deg) from the SRS per-antenna channel.
- *
- * The gNB receives SRS on its own antenna array (aperture = num_gnb_antenna_elements), so this
- * estimates the uplink AoA directly at the node that selects the beam - no UE->gNB angle plumbing,
- * no non-standard UCI (SRS gNB-side). By reciprocity UL AoA ~= DL AoD, i.e. the direction to steer
- * the O-RU beam.
- *
- * For a half-wavelength ULA a plane wave at angle theta gives a constant phase step Delta_phi =
- * pi*sin(theta) between adjacent antennas, so theta = asin(Delta_phi/pi). Delta_phi is recovered
- * from the complex cross-correlation of adjacent antennas conj(H[g])*H[g+1], accumulated coherently
- * over all UE SRS ports and PRGs (and adjacent-antenna pairs), taking a single atan2 at the end
- * (never average raw angles - that is noise-fragile and wraps at +-pi).
- *
- * Channel matrix layout (SCF 222.10.04): array[uI*Ng*Np + gI*Np + pI], uI=UE SRS port,
- * gI=gNB antenna, pI=PRG. We correlate adjacent gI for each (uI, pI).
- *
- * Returns azimuth in [-90,90] deg, or NAN if no aperture (Ng<2) / no signal. LOS-only physics:
- * in multipath the slope reflects a power-weighted dominant direction, not a clean geometric angle. */
-double nr_srs_estimate_aoa(const nfapi_nr_srs_normalized_channel_iq_matrix_t *m)
-{
-  const uint16_t Ng = m->num_gnb_antenna_elements; // aperture
-  const uint16_t Nu = m->num_ue_srs_ports;
-  const uint16_t Np = m->num_prgs;
-  if (Ng < 2 || Nu == 0 || Np == 0)
-    return NAN; // no aperture -> AoA undefined
-
-  int64_t re = 0, im = 0;
-  const bool is16 = (m->normalized_iq_representation != 0); // 0: c8_t, 1: c16_t
-  const c16_t *ch16 = (const c16_t *)m->channel_matrix;
-  const c8_t *ch8 = (const c8_t *)m->channel_matrix;
-  for (int uI = 0; uI < Nu; uI++) {
-    for (int gI = 0; gI + 1 < Ng; gI++) { // adjacent antenna pairs (extends to >2 antennas)
-      const int base_g = uI * Ng * Np + gI * Np;
-      const int base_g1 = uI * Ng * Np + (gI + 1) * Np;
-      for (int pI = 0; pI < Np; pI++) {
-        int xr, xi, yr, yi;
-        if (is16) {
-          xr = ch16[base_g + pI].r;
-          xi = ch16[base_g + pI].i;
-          yr = ch16[base_g1 + pI].r;
-          yi = ch16[base_g1 + pI].i;
-        } else {
-          xr = ch8[base_g + pI].r;
-          xi = ch8[base_g + pI].i;
-          yr = ch8[base_g1 + pI].r;
-          yi = ch8[base_g1 + pI].i;
-        }
-        re += (int64_t)xr * yr + (int64_t)xi * yi; // Re{conj(x)*y}
-        im += (int64_t)xr * yi - (int64_t)xi * yr; // Im{conj(x)*y}
-      }
-    }
-  }
-  if (re == 0 && im == 0)
-    return NAN; // no signal / passthrough with no cross-antenna phase
-
-  double s = atan2((double)im, (double)re) / M_PI; // = sin(theta) for d = lambda/2
-  if (s > 1.0)
-    s = 1.0;
-  if (s < -1.0)
-    s = -1.0;
-  return asin(s) * 180.0 / M_PI; // [-90, 90]
 }
 
 void nr_srs_ri_computation(const nfapi_nr_srs_normalized_channel_iq_matrix_t *nr_srs_normalized_channel_iq_matrix,

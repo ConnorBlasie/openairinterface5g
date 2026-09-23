@@ -227,8 +227,17 @@ typedef struct nr_mac_config_s {
   /// with MAX_NUM_SPATIAL_STREAMS, which bounds the per-PDU NFAPI wire field.
   uint16_t spatial_stream_index[NR_MAC_MAX_RU_ANTENNA_PORTS];
   /// Number of O-RU codebook beams for AoA-driven beam selection (0 = disabled).
-  /// Must match the O-RU codebook_nb_beams; the DU tiles [-90,90] into this many sectors.
+  /// Must match the O-RU codebook_nb_beams; the DU tiles [-90,90] into this many sectors
+  /// UNLESS aoa_beam_angles below is set, in which case nearest-angle selection is used instead.
   int aoa_nb_beams;
+  /// Optional per-codebook-beam pointing angle in degrees (index == codebook beam index, same
+  /// indexing as MACRLCs.beam_weights), e.g. [0, 15, -15] for a boresight + two off-axis beams.
+  /// When its length equals aoa_nb_beams, aoa_selection_procedures() picks the nearest configured
+  /// angle instead of assuming beams are evenly spread across [-90,90] -- needed for narrowly/
+  /// non-uniformly spaced real codebook layouts (uniform tiling would blur e.g. 0/+15/-15 into a
+  /// single 60-degree sector). NULL/mismatched length falls back to uniform tiling.
+  int *aoa_beam_angles;
+  int num_aoa_beam_angles;
 } nr_mac_config_t;
 
 typedef struct NR_preamble_ue {
