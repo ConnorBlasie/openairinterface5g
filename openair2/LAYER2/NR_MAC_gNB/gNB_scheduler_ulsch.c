@@ -15,6 +15,7 @@
 #include "LAYER2/nr_rlc/nr_rlc_oai_api.h"
 #include "openair3/NRPPA/nrppa_gNB_config.h"
 #include "openair2/F1AP/lib/f1ap_positioning.h"
+#include <math.h>
 
 static const uint16_t NR_TRANSFORM_PRECODE_RB_LUT[274] = {
     0,   1,   2,   3,   4,   5,   6,   6,   8,   9,   10,  10,  12,  12,  12,  15,  16,  16,  18,  18,  20,  20,  20,  20,  24,
@@ -870,6 +871,7 @@ static void nr_rx_ra_sdu(gNB_MAC_INST *mac,
     }
     // in case UE beam has changed
     old_UE->UE_beam_index = UE->UE_beam_index;
+    old_UE->aoa_codebook_beam = UE->aoa_codebook_beam;
     // Reset UL failure for old UE
     nr_mac_reset_ul_failure(&old_UE->UE_sched_ctrl);
     // Reset HARQ processes
@@ -1618,6 +1620,34 @@ void handle_nr_srs_measurements(const module_id_t module_id,
 
       sprintf(stats->srs_stats, "UL-RI %d, TPMI %d", sched_ctrl->srs_feedback.ul_ri + 1, sched_ctrl->srs_feedback.tpmi);
 
+      // AoA feedback loop:
+      // 1. ESTIMATE the azimuth AoA from the per-antenna SRS channel (phase slope over the gNB
+      //    antenna dimension). Needs a UL aperture (num_gnb_antenna_elements >= 2).
+      sched_ctrl->srs_feedback.aoa_deg = nr_srs_estimate_aoa(&nr_srs_channel_iq_matrix);
+      const double aoa = sched_ctrl->srs_feedback.aoa_deg;
+      if (!isnan(aoa)) {
+        // LOG_D: fires on every SRS report (~every few ms), so keep it debug-only to avoid log spam.
+        LOG_D(NR_MAC,
+              "[UE %04x] SRS-AoA: Ng=%d -> AoA=%.1f deg | current beam=%d\n",
+              srs_ind->rnti,
+              nr_srs_channel_iq_matrix.num_gnb_antenna_elements,
+              aoa,
+              UE->UE_beam_index);
+        // 2. SELECT + 3. APPLY (standards-correct beam management): map the AoA to the SSB beam whose
+        //    sector contains it, and drive UE_beam_index via beam_switching_procedure so SSB + PDSCH +
+        //    PDCCH + CSI-RS all ride the SAME AoA-selected beam (no QCL-Type-D hole). This is the
+        //    connected-mode refinement AFTER initial RSRP-based acquisition; the RSRP selector
+        //    (beam_selection_procedures) still handles acquisition, AoA refines once SRS is available.
+        //    Only switch on a fully-configured UE (has a CellGroup): a beam switch triggers an F1
+        //    Context Modification, which the CU refuses (and would otherwise churn) if the initial UE
+        //    Context Setup is still pending. Requires aoa_nb_beams > 0 (feature enabled) AND >1 SSB.
+        if (cell->radio_config.aoa_nb_beams > 0 && UE->CellGroup != NULL && !cell->radio_config.do_TCI) {
+          int sel = aoa_selection_procedures(cell, UE, aoa);
+          if (sel != -1)
+            beam_switching_procedure(nrmac, cell, UE, sel);
+        }
+      }
+
       break;
     }
 
@@ -2338,7 +2368,8 @@ nfapi_nr_pusch_pdu_t *prepare_pusch_pdu(nfapi_nr_ul_tti_request_t *future_ul_tti
   pusch_pdu->beamforming.prg_size = pusch_pdu->bwp_size;
   pusch_pdu->beamforming.dig_bf_interface = sched_pusch->ant_port_idx.numSpatialStreamIndices;
   memcpy(&pusch_pdu->param_v4, &sched_pusch->ant_port_idx, sizeof(pusch_pdu->param_v4));
-  const uint16_t fapi_beam_id = convert_to_fapi_beam(UE->UE_beam_index, beam_mode);
+  // AoA loop: UL PUSCH rides the AoA-selected codebook beam (decoupled from SSB UE_beam_index).
+  const uint16_t fapi_beam_id = convert_to_fapi_beam(UE->aoa_codebook_beam, beam_mode);
   for (int i = 0; i < sched_pusch->ant_port_idx.numSpatialStreamIndices;i++)
     pusch_pdu->beamforming.prgs_list[0].dig_bf_interface_list[i].beam_idx = fapi_beam_id;
   /* TRANSFORM PRECODING --------------------------------------------------------*/
@@ -2547,7 +2578,8 @@ void post_process_ulsch(gNB_MAC_INST *nr_mac,
                                                    &sched_pusch->dci_ant_idx,
                                                    sched_ctrl->aggregation_level,
                                                    sched_ctrl->cce_index,
-                                                   convert_to_fapi_beam(UE->UE_beam_index, cell->beam_info.beam_mode),
+                                                   // AoA loop: UL-grant PDCCH rides the AoA-selected codebook beam.
+                                                   convert_to_fapi_beam(UE->aoa_codebook_beam, cell->beam_info.beam_mode),
                                                    UE->rnti);
   pdcch_pdu->numDlDci++;
 

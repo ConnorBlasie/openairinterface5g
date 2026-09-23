@@ -226,6 +226,9 @@ typedef struct nr_mac_config_s {
   /// Sized to the max number of physical RU antenna ports, NOT to be confused
   /// with MAX_NUM_SPATIAL_STREAMS, which bounds the per-PDU NFAPI wire field.
   uint16_t spatial_stream_index[NR_MAC_MAX_RU_ANTENNA_PORTS];
+  /// Number of O-RU codebook beams for AoA-driven beam selection (0 = disabled).
+  /// Must match the O-RU codebook_nb_beams; the DU tiles [-90,90] into this many sectors.
+  int aoa_nb_beams;
 } nr_mac_config_t;
 
 typedef struct NR_preamble_ue {
@@ -842,8 +845,15 @@ typedef struct NR_UE_info {
   NR_CellGroupConfig_t *reconfigCellGroup;
   NR_UE_NR_Capability_t *capability;
   measgap_config_t measgap_config;
-  // UE selected beam index
+  // UE selected beam index (SSB / RRC beam association; drives ssb_index[] reconfiguration)
   uint16_t UE_beam_index;
+  // AoA-driven O-RU codebook beam index (SRS-AoA feedback loop). DECOUPLED from UE_beam_index so the
+  // SRS-estimated angle can select/apply a codebook weight-set on the DATA/control channels WITHOUT
+  // triggering an SSB reconfiguration (which is unsafe when num_active_ssb==1). Set by
+  // aoa_selection_procedures (and mirrored whenever UE_beam_index changes so behavior is unchanged
+  // when the AoA feature is disabled); consumed as the C-plane beam_id for PDSCH/PDCCH/CSI-RS/PUSCH/PUCCH.
+  // SSB stays on UE_beam_index. Defaults to 0 (broadside) until the first RA/AoA beam assignment.
+  uint16_t aoa_codebook_beam;
   /// Per-SSB L1-RSRP table, indexed by SSB index (resource_id from CSI report).
   /// INT16_MIN means no measurement received yet for that beam.
   int16_t beam_rsrp[MAX_NUM_OF_SSB];
