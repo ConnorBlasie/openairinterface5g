@@ -164,13 +164,30 @@ IQChannelErrorType shm_td_iq_channel_tx(ShmTDIQChannel *channel,
                                         uint64_t timestamp,
                                         uint64_t num_samples,
                                         int antenna,
-                                        const sample_t *tx_iq_data)
+                                        const sample_t *tx_iq_data,
+                                        double sample_rate)
 {
   AssertFatal(antenna < channel->nb_tx_ant, "Invalid antenna index %d num_antennas %d\n", antenna, channel->nb_tx_ant);
   ShmTDIQChannelData *data = channel->data;
-  // timestamp in the past
   uint64_t current_time = data->timestamp;
-  if (timestamp < current_time) {
+  // TX-side grace-tolerance window (srs_aoa_demo.md §15, kept fix for a genuine architectural
+  // defect: permanent, silent, zero-tolerance data loss keyed to a free-running wall clock). A
+  // write late by less than VRTSIM_TX_LATE_GRACE_US now succeeds instead of being dropped.
+  static bool grace_logged = false;
+  static uint64_t grace_samples = 0;
+  if (!grace_logged) {
+    const char *grace_us_env = getenv("VRTSIM_TX_LATE_GRACE_US");
+    double grace_us = grace_us_env ? atof(grace_us_env) : 300.0;
+    grace_samples = (uint64_t)(grace_us * sample_rate / 1000000.0);
+    fprintf(stderr,
+            "VRTSIM-TX-GRACE-CONFIG: grace_us=%.1f sample_rate=%.1f grace_samples=%lu\n",
+            grace_us,
+            sample_rate,
+            (unsigned long)grace_samples);
+    grace_logged = true;
+  }
+  // timestamp in the past, beyond the grace tolerance
+  if (timestamp + grace_samples < current_time) {
     return CHANNEL_ERROR_TOO_LATE;
   }
 
@@ -236,9 +253,24 @@ void shm_td_iq_channel_produce_samples(ShmTDIQChannel *channel, size_t num_sampl
   mutexunlock(data->mutex);
 }
 
-int shm_td_iq_channel_wait(ShmTDIQChannel *channel, uint64_t timestamp, uint64_t timeout_uS)
+int shm_td_iq_channel_wait(ShmTDIQChannel *channel, uint64_t timestamp, uint64_t timeout_uS, double sample_rate)
 {
   ShmTDIQChannelData *data = channel->data;
+  // RX-side forward lookahead margin (srs_aoa_demo.md §15, kept fix): delays the caller from
+  // considering a given timestamp available by VRTSIM_RX_LOOKAHEAD_MARGIN_US, reducing the chance
+  // it races ahead of a marginally-late (but now TX-grace-accepted) write. A caller that passes
+  // sample_rate=0 (e.g. the server/clock-source side, which has no such race to guard against)
+  // gets margin_samples=0 regardless of the env var.
+  static bool margin_logged = false;
+  static uint64_t margin_samples = 0;
+  if (!margin_logged) {
+    const char *margin_us_env = getenv("VRTSIM_RX_LOOKAHEAD_MARGIN_US");
+    double margin_us = margin_us_env ? atof(margin_us_env) : 300.0;
+    margin_samples = (uint64_t)(margin_us * sample_rate / 1e6);
+    fprintf(stderr, "VRTSIM-RX-LOOKAHEAD-CONFIG: margin_us=%.1f margin_samples=%lu\n", margin_us, (unsigned long)margin_samples);
+    margin_logged = true;
+  }
+  timestamp += margin_samples;
   size_t current_timestamp = data->timestamp;
   if (current_timestamp >= timestamp) {
     return 0;

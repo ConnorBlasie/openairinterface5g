@@ -78,14 +78,14 @@ void server(void)
   uint64_t timestamp = 0;
   int iq_contents = 0;
   while (timestamp < num_samples_per_update * num_updates) {
-    shm_td_iq_channel_wait(channel, timestamp + num_samples_per_update, 0);
+    shm_td_iq_channel_wait(channel, timestamp + num_samples_per_update, 0, 0.0);
     uint64_t target_timestamp = timestamp + num_samples_per_update;
     timestamp += num_samples_per_update;
     uint32_t iq_data[num_samples_per_update];
     for (int i = 0; i < num_samples_per_update; i++) {
       iq_data[i] = iq_contents;
     }
-    int result = shm_td_iq_channel_tx(channel, target_timestamp, num_samples_per_update, 0, iq_data);
+    int result = shm_td_iq_channel_tx(channel, target_timestamp, num_samples_per_update, 0, iq_data, 0.0);
     AssertFatal(result == CHANNEL_NO_ERROR, "Failed to write data\n");
     iq_contents++;
   }
@@ -106,7 +106,7 @@ int client(void)
   int iq_contents = 0;
 
   while (timestamp < num_samples_per_update * num_updates) {
-    shm_td_iq_channel_wait(channel, timestamp + num_samples_per_update, 0);
+    shm_td_iq_channel_wait(channel, timestamp + num_samples_per_update, 0, 0.0);
     // Server starts producing from second slot
     if (timestamp > num_samples_per_update) {
       uint64_t target_timestamp = timestamp - num_samples_per_update;
