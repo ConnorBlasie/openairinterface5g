@@ -611,7 +611,8 @@ static void nr_fill_indication(const PHY_VARS_gNB *gNB,
   crc->timing_advance = timing_advance_update;
   // in terms of dBFS range -128 to 0 with 0.1 step
   int n_rx = pusch_pdu->param_v4.numSpatialStreamIndices;
-  uint16_t rssi = 1280 - (10 * dB_fixed(32767 * 32767) - dB_fixed_times10(pusch->ulsch_power_tot / n_rx));
+  int rssi_raw = 1280 - (10 * dB_fixed(32767 * 32767) - dB_fixed_times10(pusch->ulsch_power_tot / n_rx));
+  uint16_t rssi = (uint16_t)max(0, min(1280, rssi_raw));
   crc->rssi = (dtx_flag == 0) ? rssi : 0;
 
   pdu->handle = pusch_pdu->handle;
