@@ -756,7 +756,7 @@ static int vrtsim_write_internal(vrtsim_state_t *vrtsim_state, openair0_timestam
   tx_timing->average_tx_budget = .05 * budget + .95 * tx_timing->average_tx_budget;
   histogram_add(&tx_timing->tx_histogram, budget);
 
-  int ret = shm_td_iq_channel_tx(vrtsim_state->channel, timestamp, nsamps, aarx, (sample_t *)samples);
+  int ret = shm_td_iq_channel_tx(vrtsim_state->channel, timestamp, nsamps, aarx, (sample_t *)samples, vrtsim_state->sample_rate);
 
   if (ret == CHANNEL_ERROR_TOO_LATE) {
     tx_timing->tx_samples_late += nsamps;
@@ -968,12 +968,19 @@ static int vrtsim_read(openair0_device_t *device, openair0_timestamp_t *ptimesta
   }
   if (vrtsim_state->role == ROLE_SERVER) {
     uint64_t timeout_uS = 0; // 0 means no timeout
-    shm_td_iq_channel_wait(vrtsim_state->channel, vrtsim_state->last_received_sample + nsamps, timeout_uS);
+    // sample_rate=0: the server/clock-source side has no reader-races-ahead-of-writer race to
+    // guard against, so the RX-lookahead margin computed inside shm_td_iq_channel_wait() is zero.
+    shm_td_iq_channel_wait(vrtsim_state->channel, vrtsim_state->last_received_sample + nsamps, timeout_uS, 0.0);
   } else {
     uint64_t start_sample = shm_td_iq_channel_get_current_sample(vrtsim_state->channel);
     uint64_t timeout_uS = 2 * 1000 * 1000; // 2 seconds timeout waiting for sample number to change
-    //
-    while (shm_td_iq_channel_wait(vrtsim_state->channel, vrtsim_state->last_received_sample + nsamps, timeout_uS) == 1) {
+    // RX-side forward lookahead margin (srs_aoa_demo.md §15, kept fix) is applied inside
+    // shm_td_iq_channel_wait() via VRTSIM_RX_LOOKAHEAD_MARGIN_US, sized from sample_rate here.
+    while (shm_td_iq_channel_wait(vrtsim_state->channel,
+                                  vrtsim_state->last_received_sample + nsamps,
+                                  timeout_uS,
+                                  vrtsim_state->sample_rate)
+           == 1) {
       uint64_t sample = shm_td_iq_channel_get_current_sample(vrtsim_state->channel);
       if (sample == start_sample) {
         LOG_E(HW,

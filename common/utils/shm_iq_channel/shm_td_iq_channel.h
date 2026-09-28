@@ -64,6 +64,8 @@ ShmTDIQChannel *shm_td_iq_channel_connect(const char *name, int timeout_in_secon
  * @param num_samples The number of samples to write.
  * @param antenna The antenna index.
  * @param tx_iq_data The TX IQ data to write.
+ * @param sample_rate The channel's sample rate in Hz, used to size the late-write grace window
+ *        (VRTSIM_TX_LATE_GRACE_US).
  *
  * @return CHANNEL_NO_ERROR if successful, error type otherwise
  */
@@ -71,7 +73,8 @@ IQChannelErrorType shm_td_iq_channel_tx(ShmTDIQChannel *channel,
                                         uint64_t timestamp,
                                         uint64_t num_samples,
                                         int antenna,
-                                        const sample_t *tx_iq_data);
+                                        const sample_t *tx_iq_data,
+                                        double sample_rate);
 
 /**
  * @brief Receive iq data from the channel
@@ -103,10 +106,12 @@ void shm_td_iq_channel_produce_samples(ShmTDIQChannel *channel, uint64_t num_sam
  * @param channel The ShmTDIQChannel structure.
  * @param timestamp The timestamp for which to wait.
  * @param timeout_uS The timeout in microseconds to wait for the sample. 0 means wait indefinitely.
+ * @param sample_rate The channel's sample rate in Hz, used to size the RX-side forward lookahead
+ *        margin (VRTSIM_RX_LOOKAHEAD_MARGIN_US). Pass 0 to disable the margin for this call.
  *
  * @return 0 if the sample is available, 1 if timed out
  */
-int shm_td_iq_channel_wait(ShmTDIQChannel *channel, uint64_t timestamp, uint64_t timeout_uS);
+int shm_td_iq_channel_wait(ShmTDIQChannel *channel, uint64_t timestamp, uint64_t timeout_uS, double sample_rate);
 
 /**
  * @brief Aborts the IQ channel causing the wait to return immediately
