@@ -173,8 +173,8 @@ IQChannelErrorType shm_td_iq_channel_tx(ShmTDIQChannel *channel,
   if (timestamp < current_time) {
     return CHANNEL_ERROR_TOO_LATE;
   }
-  // timestamp is too far in the future
-  if (timestamp - current_time + num_samples >= CIRCULAR_BUFFER_SIZE) {
+
+  if ((int64_t)(timestamp - current_time) + (int64_t)num_samples >= (int64_t)CIRCULAR_BUFFER_SIZE) {
     return CHANNEL_ERROR_TOO_EARLY;
   }
 
@@ -202,7 +202,7 @@ IQChannelErrorType shm_td_iq_channel_rx(ShmTDIQChannel *channel,
   ShmTDIQChannelData *data = channel->data;
   // timestamp in the future
   uint64_t current_time = data->timestamp;
-  if (timestamp > current_time) {
+  if (timestamp + num_samples - 1 > current_time) {
     return CHANNEL_ERROR_TOO_EARLY;
   }
   // timestamp is too far in the past
