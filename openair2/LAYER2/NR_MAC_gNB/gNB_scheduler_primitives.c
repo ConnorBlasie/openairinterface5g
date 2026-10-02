@@ -4126,6 +4126,7 @@ int aoa_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE, double aoa
     const int *angles = cell->radio_config.aoa_beam_angles;
     // aoa_deg was measured through the CURRENT beam's UL weights -- see the COMPENSATION note above.
     aoa_abs = nr_srs_aoa_to_absolute(aoa_deg, angles[cur]);
+    LOG_D(NR_MAC, "[UE %04x] SRS-AoA-comp: raw %.2f -> abs %.2f deg | beam %d\n", UE->rnti, aoa_deg, aoa_abs, cur);
     double best_dist = INFINITY;
     beam = 0;
     for (int b = 0; b < num_ssb; b++) {
@@ -4151,6 +4152,7 @@ int aoa_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE, double aoa
     // aoa_deg was measured through the CURRENT beam's UL weights, which point at its sector center --
     // see the COMPENSATION note above.
     aoa_abs = nr_srs_aoa_to_absolute(aoa_deg, -90.0 + (cur + 0.5) * step);
+    LOG_D(NR_MAC, "[UE %04x] SRS-AoA-comp: raw %.2f -> abs %.2f deg | beam %d\n", UE->rnti, aoa_deg, aoa_abs, cur);
     beam = (int)floor((aoa_abs + 90.0) / step);
     if (beam < 0)
       beam = 0;
