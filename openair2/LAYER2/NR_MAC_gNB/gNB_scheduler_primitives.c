@@ -12,6 +12,7 @@
 
 #include "NR_MAC_gNB/nr_mac_gNB.h"
 #include "NR_MAC_gNB/mac_proto.h"
+#include "NR_MAC_gNB/nr_srs_aoa.h"
 #include "common/utils/bits.h"
 #include "common/utils/LOG/log.h"
 #include "UTIL/OPT/opt.h"
@@ -4085,13 +4086,20 @@ int beam_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE)
  * the gNB from the SRS per-antenna channel (nr_srs_estimate_aoa) and this is called from
  * handle_nr_srs_measurements - i.e. connected-mode refinement AFTER initial RSRP-based acquisition.
  *
- * @param aoa_deg   estimated azimuth AoA in [-90,90] (from the SRS estimator, via the caller)
+ * @param aoa_deg   estimated azimuth AoA in [-90,90] (from the SRS estimator, via the caller), measured
+ *                  through the currently active beam's UL weights -- see the compensation note below
  *
  * The beam count is the number of TRANSMITTED SSB beams (num_active_ssb) - each SSB is one steering
  * direction - NOT the O-RU codebook size. AoA tiles [-90,90] into num_active_ssb equal sectors and
  * selects the SSB beam for its sector; the caller drives UE_beam_index via beam_switching_procedure.
  * Hysteresis: only switch when the angle is past the sector center by a margin, so a UE near a sector
- * boundary does not flap UE_beam_index (each switch triggers an F1 reconfiguration when do_CSIRS). */
+ * boundary does not flap UE_beam_index (each switch triggers an F1 reconfiguration when do_CSIRS).
+ *
+ * COMPENSATION: nr_srs_estimate_aoa() measures the phase slope of the SRS as delivered by the O-RU,
+ * after it applied the current beam's UL receive weights, so the raw angle is not relative to the
+ * array's physical boresight. nr_srs_aoa_to_absolute() undoes that weighting in the sine domain
+ * before any comparison against the absolute per-beam angles below. Without it the estimate depends
+ * on which beam is active, not only on the UE position, and switch decisions flap. */
 int aoa_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE, double aoa_deg)
 {
   if (cell->beam_info.beam_mode == NO_BEAM_MODE)
@@ -4107,6 +4115,7 @@ int aoa_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE, double aoa
   int beam;
   bool switch_now;
   double margin_deg;
+  double aoa_abs; // aoa_deg converted to the array-boresight frame
 
   if (cell->radio_config.num_aoa_beam_angles == num_ssb) {
     // NEAREST-ANGLE mode: pick the configured beam pointing angle closest to the estimate. Unlike
@@ -4115,10 +4124,12 @@ int aoa_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE, double aoa
     // [-90,90] (which would blur three such beams into a single ~60-deg sector and never
     // distinguish +15 from -15).
     const int *angles = cell->radio_config.aoa_beam_angles;
+    // aoa_deg was measured through the CURRENT beam's UL weights -- see the COMPENSATION note above.
+    aoa_abs = nr_srs_aoa_to_absolute(aoa_deg, angles[cur]);
     double best_dist = INFINITY;
     beam = 0;
     for (int b = 0; b < num_ssb; b++) {
-      const double d = fabs(aoa_deg - angles[b]);
+      const double d = fabs(aoa_abs - angles[b]);
       if (d < best_dist) {
         best_dist = d;
         beam = b;
@@ -4130,14 +4141,17 @@ int aoa_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE, double aoa
     }
     // HYSTERESIS: only switch if clearly closer to the candidate beam than to the current one --
     // a fixed degree margin (not sector-relative, since sectors aren't uniform here).
-    const double cur_dist = fabs(aoa_deg - angles[cur]);
+    const double cur_dist = fabs(aoa_abs - angles[cur]);
     margin_deg = 3.0; // require >=3 deg clearer fit to the new beam before switching
     switch_now = (cur_dist - best_dist) >= margin_deg;
   } else {
     // UNIFORM-TILING mode (default, no aoa_beam_angles configured): assume beams are spread evenly
     // across [-90,90], one sector per SSB.
     const double step = 180.0 / (double)num_ssb; // sector width per SSB beam
-    beam = (int)floor((aoa_deg + 90.0) / step);
+    // aoa_deg was measured through the CURRENT beam's UL weights, which point at its sector center --
+    // see the COMPENSATION note above.
+    aoa_abs = nr_srs_aoa_to_absolute(aoa_deg, -90.0 + (cur + 0.5) * step);
+    beam = (int)floor((aoa_abs + 90.0) / step);
     if (beam < 0)
       beam = 0;
     if (beam >= num_ssb)
@@ -4153,15 +4167,28 @@ int aoa_selection_procedures(nr_cell_sched_t *cell, NR_UE_info_t *UE, double aoa
     // jitter, so a stationary UE near a boundary does NOT flap. Sparse switches -> no reconnect
     // churn. Lower only for a deliberate flapping demo.
     margin_deg = step * 0.25;
-    switch_now = fabs(aoa_deg - sector_center) <= (step * 0.5 - margin_deg);
+    switch_now = fabs(aoa_abs - sector_center) <= (step * 0.5 - margin_deg);
   }
 
   if (!switch_now) {
-    LOG_D(NR_MAC, "[UE %04x] AoA-beam: %.1f deg near boundary of SSB beam %d, holding beam %d\n", UE->rnti, aoa_deg, beam, cur);
+    LOG_D(NR_MAC,
+          "[UE %04x] AoA-beam: %.1f deg (raw %.1f) near boundary of SSB beam %d, holding beam %d\n",
+          UE->rnti,
+          aoa_abs,
+          aoa_deg,
+          beam,
+          cur);
     return -1;
   }
 
-  LOG_I(NR_MAC, "[UE %04x] AoA-beam: AoA=%.1f deg -> SSB beam %d (cur %d, num_ssb=%d)\n", UE->rnti, aoa_deg, beam, cur, num_ssb);
+  LOG_I(NR_MAC,
+        "[UE %04x] AoA-beam: AoA=%.1f deg (raw %.1f) -> SSB beam %d (cur %d, num_ssb=%d)\n",
+        UE->rnti,
+        aoa_abs,
+        aoa_deg,
+        beam,
+        cur,
+        num_ssb);
   UE->aoa_codebook_beam = (uint16_t)beam; // data beam mirrors the SSB beam (same beam, no QCL hole)
   return beam;
 }

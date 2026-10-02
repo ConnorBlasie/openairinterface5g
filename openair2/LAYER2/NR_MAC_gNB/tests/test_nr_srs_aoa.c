@@ -148,6 +148,58 @@ static void test_c8_representation(void)
   printf("OK: c8_t path true=%.1f deg -> estimated=%.2f deg\n", true_deg, est);
 }
 
+// Estimate the AoA of a UE at theta_deg as seen through the O-RU's UL receive weights conj(w[n])
+// (combine_ul_beam_fd()), with w the per-antenna Q15 codebook weights of the active beam, then
+// convert it back to the array frame with nr_srs_aoa_to_absolute(beam_deg).
+static void check_beam_frame(double theta_deg, double beam_deg, const c16_t *w, int Ng)
+{
+  nfapi_nr_srs_normalized_channel_iq_matrix_t m;
+  memset(&m, 0, sizeof(m));
+  m.normalized_iq_representation = 1;
+  m.num_gnb_antenna_elements = Ng;
+  m.num_ue_srs_ports = 1;
+  m.num_prgs = 2;
+  c16_t *ch = (c16_t *)m.channel_matrix;
+  build_channel_matrix(theta_deg, Ng, 1, 2, ch);
+  for (int gI = 0; gI < Ng; gI++) {
+    for (int pI = 0; pI < 2; pI++) {
+      c16_t *h = &ch[gI * 2 + pI];
+      const int32_t r = ((int32_t)h->r * w[gI].r + (int32_t)h->i * w[gI].i) >> 15; // h * conj(w)
+      const int32_t i = ((int32_t)h->i * w[gI].r - (int32_t)h->r * w[gI].i) >> 15;
+      *h = (c16_t){.r = (int16_t)r, .i = (int16_t)i};
+    }
+  }
+  const double raw = nr_srs_estimate_aoa(&m);
+  const double abs_deg = nr_srs_aoa_to_absolute(raw, beam_deg);
+  if (isnan(raw) || fabs(abs_deg - theta_deg) > AOA_TOL_DEG) {
+    fprintf(stderr, "FAIL: theta=%.1f beam=%.1f: raw=%.2f -> absolute=%.2f\n", theta_deg, beam_deg, raw, abs_deg);
+    abort();
+  }
+  printf("OK: theta=%6.1f deg on beam %5.1f deg: raw=%7.2f -> absolute=%6.2f deg\n", theta_deg, beam_deg, raw, abs_deg);
+}
+
+static void test_beam_frame_compensation(void)
+{
+  // Beam 1 of ru.band77.mu1.106rb.4x4_beamforming_2beam.conf (+15 deg), the diagonal weights verbatim.
+  const c16_t w15[4] = {{32767, 0}, {22519, -23803}, {-1815, -32717}, {-25013, -21166}};
+  check_beam_frame(9.7, 15.0, w15, 4); // the hardware case of srs_aoa_demo.md sec39
+  check_beam_frame(0.0, 15.0, w15, 4);
+  check_beam_frame(15.0, 15.0, w15, 4);
+
+  // Same steering formula for other beams, including ones where sin(theta) + sin(beam) wraps.
+  const double beams[] = {0.0, -15.0, 30.0, 45.0, -45.0};
+  const double thetas[] = {-60.0, -30.0, 0.0, 9.7, 30.0, 60.0};
+  for (unsigned b = 0; b < sizeof(beams) / sizeof(beams[0]); b++) {
+    c16_t w[4];
+    for (int n = 0; n < 4; n++) {
+      const double ph = -n * M_PI * sin(beams[b] * M_PI / 180.0);
+      w[n] = (c16_t){.r = (int16_t)lround(32767 * cos(ph)), .i = (int16_t)lround(32767 * sin(ph))};
+    }
+    for (unsigned t = 0; t < sizeof(thetas) / sizeof(thetas[0]); t++)
+      check_beam_frame(thetas[t], beams[b], w, 4);
+  }
+}
+
 int main(void)
 {
   test_known_angles();
@@ -155,6 +207,7 @@ int main(void)
   test_no_aperture_returns_nan();
   test_zero_signal_returns_nan();
   test_c8_representation();
+  test_beam_frame_compensation();
   printf("All SRS-AoA estimator tests passed.\n");
   return 0;
 }
