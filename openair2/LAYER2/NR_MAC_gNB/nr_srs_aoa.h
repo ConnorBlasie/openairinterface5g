@@ -83,4 +83,20 @@ static inline double nr_srs_estimate_aoa(const nfapi_nr_srs_normalized_channel_i
   return asin(s) * 180.0 / M_PI; // [-90, 90]
 }
 
+/* Convert a raw nr_srs_estimate_aoa() result into the array-boresight frame, given the pointing
+ * angle beam_deg of the beam whose weights the O-RU applied to the UL samples.
+ *
+ * The O-RU combines UL with the receive weight conj(w) (combine_ul_beam_fd()). The codebook steers
+ * beam_deg with w[n] = exp(-j*n*pi*sin(beam_deg)), so conj(w) adds pi*sin(beam_deg) to the
+ * per-antenna phase step the estimator measures: sin(raw) = sin(theta) + sin(beam_deg), modulo 2
+ * because the phase step itself wraps at +-pi. Undo it in that same sine/phase domain, with the
+ * same wrap. Subtracting degrees is only approximate, and breaks once the sum leaves [-1, 1)
+ * (e.g. theta 30 deg on a 45 deg beam reads raw -52.5 deg). */
+static inline double nr_srs_aoa_to_absolute(double raw_deg, double beam_deg)
+{
+  double s = sin(raw_deg * M_PI / 180.0) - sin(beam_deg * M_PI / 180.0);
+  s -= 2.0 * floor((s + 1.0) / 2.0); // wrap to [-1, 1)
+  return asin(s) * 180.0 / M_PI;
+}
+
 #endif /* NR_SRS_AOA_H */
