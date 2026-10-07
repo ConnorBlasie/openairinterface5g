@@ -76,6 +76,7 @@ class CirDb:
         self.dt = float(e["snapshot_dt_s"])
         self.taps = np.memmap(f"{directory}/{bin_name}", dtype=np.complex64, mode="r", offset=e["offset_bytes"],
                               shape=(self.S, self.n_tx * self.n_rx, self.L))
+        self._phase_cache = {}
 
     def snapshot_at(self, timestamp, t0):
         """snapshot the rfsimulator applied at radio timestamp `timestamp`, t0 being its snapshot 0"""
@@ -84,9 +85,27 @@ class CirDb:
     def uplink_response(self, s, freqs_hz, gnb_ant, ue_ant):
         """H(f) from UE element ue_ant to gNB element gnb_ant at snapshot s (TDD reciprocity: the
         database's downlink link, same taps)"""
-        link = ue_ant + self.n_rx * gnb_ant
-        j = np.arange(self.L)
-        return self.taps[s, link] @ np.exp(-2j * np.pi * np.outer(j, freqs_hz) / self.fs)
+        return self.uplink_response_block(s, freqs_hz, ue_ant, gnb_ant + 1)[gnb_ant]
+
+    def _phase_matrix(self, freqs_hz):
+        """exp(-2j pi f tau) at every tap delay, for a given frequency grid: only the snapshot-
+        specific taps change record to record, not this, and the SRS's frequency grid is normally
+        the same for an entire run, so cache it by its exact frequencies rather than rebuild an
+        L x M matrix of exp() on every call."""
+        key = freqs_hz.tobytes()
+        phase = self._phase_cache.get(key)
+        if phase is None:
+            j = np.arange(self.L)
+            phase = np.exp(-2j * np.pi * np.outer(j, freqs_hz) / self.fs)  # [L, M]
+            self._phase_cache[key] = phase
+        return phase
+
+    def uplink_response_block(self, s, freqs_hz, ue_ant, nb_rx):
+        """H(f) from UE element ue_ant to every gNB element 0..nb_rx-1 at snapshot s, as one matmul:
+        the DFT phase matrix only depends on freqs_hz, not on the gNB element, so build it once per
+        distinct frequency grid instead of once per antenna per record."""
+        links = ue_ant + self.n_rx * np.arange(nb_rx)
+        return self.taps[s, links] @ self._phase_matrix(freqs_hz)  # [nb_rx, L] @ [L, M] -> [nb_rx, M]
 
 
 def cirdb_t0_from_log(gnb_log):

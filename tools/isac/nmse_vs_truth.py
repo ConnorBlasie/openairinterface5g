@@ -52,7 +52,7 @@ def record_nmse(rec, db, t0):
     hdr = rec.hdr
     s = db.snapshot_at(rec.srs_timestamp(), t0)
     freqs = [rec.freq_offsets_hz(p) for p in range(hdr["n_ports"])]
-    h_true = np.array([[db.uplink_response(s, freqs[p], a, p) for a in range(hdr["nb_rx"])] for p in range(hdr["n_ports"])])
+    h_true = np.array([db.uplink_response_block(s, freqs[p], p, hdr["nb_rx"]) for p in range(hdr["n_ports"])])
     alpha, tau = fit_gain_delay(h_true, rec.h, freqs)
     err = 0.0
     ref = 0.0
@@ -91,7 +91,13 @@ def main():
     records = [r for r in all_records if r.hdr["signal_power"] > 0]
     if not records:
         sys.exit(f"no records with an SRS in {args.dump}")
-    results = [record_nmse(r, db, t0) for r in records]
+    results = []
+    report_every = max(1, len(records) // 100)
+    for i, r in enumerate(records):
+        results.append(record_nmse(r, db, t0))
+        if (i + 1) % report_every == 0 or i + 1 == len(records):
+            print(f"\r{i + 1}/{len(records)} records ({100 * (i + 1) / len(records):.0f}%)", end="", file=sys.stderr, flush=True)
+    print(file=sys.stderr)
     nmse = np.array([r["nmse_db"] for r in results])
     summary = {
         "records": len(results),
