@@ -84,7 +84,8 @@ uses), not a `build/` at the repo root. Build with the `build_oai` wrapper; `--c
 options straight through to `cmake`. Pick the invocation matching your GPU (see the table in §0):
 
 ```bash
-cd cmake_targets
+git clone https://github.com/ConnorBlasie/openairinterface5g.git -b isac-task
+cd openairinterface5g/cmake_targets
 ./build_oai -I   # once per machine, to install system dependencies
 
 # GH200 machine (sm_90)
