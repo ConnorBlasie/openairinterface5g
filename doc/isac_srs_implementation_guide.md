@@ -21,18 +21,20 @@ and plot the result. Read `isac_srs_demo.md` first for the "why"; this doc is th
   real device to target, and every verification step from §6 onward (`test_srs_est`, `nr_srssim`,
   the end-to-end rfsim walk) needs the module to actually execute. A toolkit that predates your
   target architecture fails even earlier, at compile time: e.g. CUDA 11.5 only goes up to `sm_87`
-  and doesn't know `sm_121` (Blackwell/GB10) exists, so `cmake`/`nvcc` will reject that architecture. sm90 is for gracehopper 200 (gh200)
+  and doesn't know `sm_121` (Blackwell/GB10) exists, so `cmake`/`nvcc` will reject that architecture
   flag outright. You need a real GPU and a CUDA toolkit new enough to target it.
   - If `nvcc` isn't found even though `nvidia-smi` works, the toolkit is probably installed but not
     on `PATH` (the driver and the toolkit are separate installs) — check
     `ls /usr/local/cuda*/bin/nvcc` and `export PATH=/usr/local/cuda/bin:$PATH` (that path is usually
     a symlink to whichever version is "current").
   - **Match `CMAKE_CUDA_ARCHITECTURES` to the GPU you're actually on, not to the doc's GB10
-    default.** Two workshop machines in particular are easy to mix up:
+    default.** The workshop machines are easy to mix up:
+
     | Machine | GPU | Compute capability | `CMAKE_CUDA_ARCHITECTURES` |
     |---|---|---|---|
     | GB10 (the doc's reference target) | Blackwell | `sm_121` | `121` (needs CUDA 12.8+) |
-    | `falcon-gh200.sboai.cs.eurecom.fr` | GH200 (Grace Hopper) | `sm_90` | `90` |
+    | GH200 Machine | GH200 (Grace Hopper) | `sm_90` | `90` |
+    | A100 machine | A100 (Ampere) | `sm_80` | `80` |
 
     Confirm with `nvidia-smi --query-gpu=name,compute_cap --format=csv` — don't assume from the
     machine name alone.
@@ -43,13 +45,14 @@ and plot the result. Read `isac_srs_demo.md` first for the "why"; this doc is th
   122.88 Msps will deadlock the default kernel buffers otherwise):
   ```bash
   sudo sysctl -w net.core.wmem_max=100000000 net.core.rmem_max=100000000
-  #This should already be set on the pod devices
+  # already set on the pod devices
   ```
 
 ## 1. Generate the CIR database
 
 The gNB/UE link replays a ray-traced channel instead of a statistical model. Generate it once; it's
 reused by every rfsim run afterward.
+
 ```bash
 git clone https://gitlab.eurecom.fr/oai/raytracing-channel-emulator.git -b isac-demo
 cd raytracing-channel-emulator
@@ -76,27 +79,28 @@ Set `DB=$(pwd)/out_full` (or wherever you generated it) — every gNB/UE invocat
 
 ## 2. Build OAI with the CUDA SRS module
 
-Per repo convention, the build directory goes under `cmake_targets/ran_build/build` (same default
-`build_oai` itself would use), not a `build/` at the repo root:
+Per repo convention, the build directory is `cmake_targets/ran_build/build` (the default `build_oai`
+uses), not a `build/` at the repo root. Build with the `build_oai` wrapper; `--cmake-opt` passes
+options straight through to `cmake`. Pick the invocation matching your GPU (see the table in §0):
 
-`build_oai`.** If you're more used to the wrapper than raw `cmake`, it defaults to
-this same `cmake_targets/ran_build/build` directory, and `--cmake-opt` passes options straight
-through to `cmake`:
 ```bash
 cd cmake_targets
 ./build_oai -I   # once per machine, to install system dependencies
-#GH200 Machine
+
+# GH200 machine (sm_90)
 ./build_oai --gNB --nrUE -w SIMU -P --ninja \
     --cmake-opt "-DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_CHANNEL_SIM_CUDA=ON -DENABLE_SRS_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=90 -DENABLE_TESTS=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CUDA_FLAGS=\"-Xcompiler -fPIC\"" \
     && cmake --build ran_build/build --target srs_est_cuda test_srs_est ldpc
 
-#A100 machine
+# A100 machine (sm_80, x86)
 ./build_oai --gNB --nrUE -w SIMU -P --ninja \
     --cmake-opt "-DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_CHANNEL_SIM_CUDA=ON -DENABLE_SRS_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80 -DENABLE_TESTS=ON -DCUDAToolkit_ROOT=/usr/local/cuda/targets/x86_64-linux -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_CUDA_FLAGS=\"-Xcompiler -fPIC\"" \
     && cmake --build ran_build/build --target srs_est_cuda test_srs_est ldpc
 ```
 
-May need extra -DCUDAToolkit_ROOT=/usr/local/cuda/targets/x86_64-linux  if running from x86 platform OR add to top level of CMakeList.txt
+On an x86 host, CMake may need `-DCUDAToolkit_ROOT=/usr/local/cuda/targets/x86_64-linux` to find the
+toolkit (already included in the A100 invocation above), or set it at the top of the root
+`CMakeLists.txt`. 
 
 `srs_est_cuda` and `ldpc` are both `MODULE` targets (loaded with `dlopen` at runtime as
 `.so`s), so their object code must be position-independent. `CMAKE_POSITION_INDEPENDENT_CODE`
@@ -126,14 +130,14 @@ the directory `build_oai` just populated:
   `openair1/PHY/CODING/CMakeLists.txt`, and only `coding` is in that auto-added list — `ldpc` itself
   is missing unless you ask for it. (`--build-lib` doesn't cover it either: that flag only knows the
   *offload* variants, `ldpc_aal`/`ldpc_cuda`/`ldpc_ors`, not plain `ldpc`.)
-```
+
 From here on, every command in this guide that says "build directory" means
-`cmake_targets/ran_build/build` either way.
+`cmake_targets/ran_build/build`.
 
 Separately: whenever `build_oai` is given any target at all, it silently also appends
 `params_libconfig coding rfsimulator dfts params_yaml vrtsim rf_emulator` to the list
-(`cmake_targets/build_oai:423`) — so `rfsimulator`, `params_libconfig` and `dfts` from the plain-cmake
-invocation above are already covered by `-w SIMU` plus that auto-add; nothing extra to ask for there.
+(`cmake_targets/build_oai:423`) — so `rfsimulator`, `params_libconfig` and `dfts` are already
+covered by `-w SIMU` plus that auto-add; nothing extra to ask for there.
 
 `ENABLE_CHANNEL_SIM_CUDA` is unrelated to your estimator; it's what accelerates the CIR-DB
 convolution the rfsimulator itself does on each end. Needed for a 32x32 real-time-ish run, not for
@@ -193,7 +197,7 @@ needs none of your own code, just the existing fixed-point path.
   — `--isac.dump_file`/`nmse_vs_truth.py` only ever scores your GPU module, never the fixed-point
   baseline, no matter how you invoke the gNB.
 
-In short: use `nr_srssim` for the fxpt number at whatever scale you care about (including the full
+In short: use `nr_srssim` for the fixed-point number at whatever scale you care about (including the full
 32x32/273 PRB config from §8, if you want the true 20 dB SNR comparison point:
 `./nr_srssim -R 273 -z 32 -y 4 -g A,l,0 -s 20 -S 20 -n 10`), and treat that as your "before" — there's
 no way to get a fixed-point "before" number out of the unit test or the end-to-end walk.
@@ -282,63 +286,68 @@ ctest -R nr_srssim.module --output-on-failure
 
 `-N <dB>` is the pass/fail gate (exit nonzero if NMSE doesn't clear it); without
 `--loader.srs_est.shlibversion _cuda` you get the fixed-point estimator's number instead, which is
-the right way to sanity-check the harness itself before trusting a GPU result. `ctest -R
-nr_srssim.module` runs the five fixed scenarios wired up in
+the right way to sanity-check the harness itself before trusting a GPU result (§4).
+`ctest -R nr_srssim.module` runs the five fixed scenarios wired up in
 `openair1/SIMULATION/tests/CMakeLists.txt` (51-273 PRB, TDL-A/C/AWGN, comb-2/4, 1-4 ports) against
 the per-scenario gates in the target table. These exercise realistic 3GPP channel models (not just
 the unit test's synthetic taps) and a PRB count that matches the real 32x32 demo.
 
 ## 8. End-to-end: core network, gNB, UE over the ray-traced channel
 
+### With the 5G core
+
 **Core network** (everything except gNB/UE, which run on the host):
+
 ```bash
 cd ci-scripts/yaml_files/5g_rfsimulator
 docker compose up -d mysql oai-amf oai-smf oai-upf oai-ext-dn
 ```
+
 The config expects the gNB reachable at `192.168.71.129` on the host.
 
 **gNB and UE**, `DB` pointing at the directory with `isac.yaml`/`cir_db.bin` from step 1. Run from
 `cmake_targets` (binaries at `ran_build/build/`, conf/data paths relative to the repo root, same as
-the rest of the OAI docs) — `isac.bin` lands in `cmake_targets/` too:
+the rest of the OAI docs) — `isac.bin` lands in `cmake_targets/` too. Set `DB` and `CH` in both
+terminals:
+
 ```bash
 cd cmake_targets
 DB=/home/blasie/oai_nc_state_demo/raytracing-channel-emulator/server/isac/out_full
-
 CH="--rfsimulator.[0].cirdb_yaml $DB/isac.yaml --rfsimulator.[0].cirdb_file $DB/cir_db.bin --channelmod.noise_power_dBFS -63"
 
+# Terminal 1: gNB
 sudo ./ran_build/build/nr-softmodem -O ../ci-scripts/conf_files/gnb.sa.band78.273prb.rfsim.32x32.isac.conf --rfsim $CH \
      --loader.srs_est.shlibversion _cuda --isac.dump_file isac.bin 2>&1 | tee gnb.log
 
+# Terminal 2: UE
 sudo ./ran_build/build/nr-uesoftmodem -O ../ci-scripts/conf_files/nrue.uicc.conf -C 3450720000 -r 273 --numerology 1 \
      --band 78 --ssb 1518 --rfsim --rfsimulator.[0].serveraddr 127.0.0.1 \
      --ue-nb-ant-tx 4 --ue-nb-ant-rx 4 \
      --uecap_file ../targets/PROJECTS/GENERIC-NR-5GC/CONF/uecap_ports4.xml $CH
 ```
 
-#Withoout the 5g core 
-#but still see [NR_MAC] Invalid timing advance offset for RNTI 1234 on gNB
-#Terminal 1
+### Without the 5G core (`--phy-test`)
 
+Same channel, no core network or RRC attach. The gNB still logs
+`[NR_MAC] Invalid timing advance offset for RNTI 1234` in this mode.
+
+```bash
+cd cmake_targets
 DB=/home/jovyan/raytracing-channel-emulator/server/isac/out_full
-
 CH="--rfsimulator.[0].cirdb_yaml $DB/isac.yaml --rfsimulator.[0].cirdb_file $DB/cir_db.bin --channelmod.noise_power_dBFS -63"
 
+# Terminal 1: gNB
 sudo ./ran_build/build/nr-softmodem -O ../ci-scripts/conf_files/gnb.sa.band78.273prb.rfsim.32x32.isac.conf --rfsim --phy-test \
      --uecap_file ../targets/PROJECTS/GENERIC-NR-5GC/CONF/uecap_ports4.xml $CH \
      --loader.srs_est.shlibversion _cuda --isac.dump_file isac.bin 2>&1 | tee gnb.log
 
-#Terminal 2
-
-DB=/home/jovyan/raytracing-channel-emulator/server/isac/out_full
-
-CH="--rfsimulator.[0].cirdb_yaml $DB/isac.yaml --rfsimulator.[0].cirdb_file $DB/cir_db.bin --channelmod.noise_power_dBFS -63"
-
+# Terminal 2: UE
 sudo ./ran_build/build/nr-uesoftmodem --phy-test -C 3450720000 -r 273 --numerology 1 --band 78 --ssb 1518 \
      --rfsim --rfsimulator.[0].serveraddr 127.0.0.1 --ue-nb-ant-tx 4 --ue-nb-ant-rx 4 $CH
+```
 
+### Notes
 
-
-Notes:
 - `uecap_ports4.xml` is what makes the UE advertise 4 SRS ports — without it you'll silently get a
   single-port SRS and a much less interesting (and less representative) test.
 - Without `--loader.srs_est.shlibversion _cuda` the same setup runs fine on the fixed-point
@@ -365,6 +374,7 @@ Notes:
 **NMSE against the true channel** (fits and removes the UE's unknown TX gain/phase and the link's
 absolute timing per record, since neither matters for sensing but both would otherwise dominate a
 naive NMSE):
+
 ```bash
 cd tools/isac
 python3 nmse_vs_truth.py --dump ../../cmake_targets/isac.bin --cirdb $DB --gnb-log ../../cmake_targets/gnb.log --out nmse.json --gate-db -30
