@@ -1789,7 +1789,7 @@ void RCconfig_nr_macrlc(configmodule_interface_t *cfg, nr_cell_sched_t **out_cel
       if (cell->beam_info.beam_mode != NO_BEAM_MODE) {
         if (cell->beam_info.beam_mode == PRECONFIGURED_BEAM_IDX)
           AssertFatal(NFAPI_MODE == NFAPI_MONOLITHIC, "Analog beamforming only supported for monolithic scenario\n");
-        beam_info->beam_allocation = malloc16(beams_per_period * sizeof(beam_info->beam_allocation));
+        beam_info->beam_allocation = malloc16(beams_per_period * sizeof(*beam_info->beam_allocation));
         beam_info->beam_duration = *gpd(params, np, MACRLC_BEAM_DURATION)->u8ptr;
         beam_info->beam_allocation_size = -1; // to be initialized once we have information on frame configuration
       }
