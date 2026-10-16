@@ -1844,6 +1844,10 @@ void RCconfig_nr_macrlc(configmodule_interface_t *cfg, nr_cell_sched_t **out_cel
       // Read spatial stream indices
       config_spatial_stream_index(params, np, &cell->radio_config, num_tx);
 
+      // AoA-driven beam selection: number of O-RU codebook beams (0 = disabled). Must match the
+      // O-RU codebook_nb_beams. Used to gate aoa_selection_procedures / handle_nr_srs_measurements.
+      cell->radio_config.aoa_nb_beams = *gpd(params, np, MACRLC_AOA_NB_BEAMS)->u8ptr;
+
       // triggers also PHY initialization in case we have L1 via FAPI
       nr_mac_config_scc(nrmac, cell, scc, &config);
       RC.nrmac[j]->positioning_config = RCconfig_nr_positioning();
