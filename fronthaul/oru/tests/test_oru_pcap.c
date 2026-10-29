@@ -593,9 +593,10 @@ static void ref_check_dl_bfw(void *ctx, const dl_iq_stream_t *streams, int num_s
 /*
  * Combine checks: the DL/UL combine reading the processor's weights through get_bf_weights() must equal the
  * codebook-only combine of the same PRBs split at the generator's bundles, with a codebook holding the generator's
- * weights. Bundle b of PRB element k is codebook beam REF_CB_BEAM(k, b). The codebook has ORU_CODEBOOK_MAX_NB_TX
- * antennas, so both combine the first ORU_CODEBOOK_MAX_NB_TX of the REF_NUM_BF_ELM weights.
+ * weights. Bundle b of PRB element k is codebook beam REF_CB_BEAM(k, b). Both combine all REF_NUM_BF_ELM weights, one
+ * per TXRU.
  */
+#define REF_NB_TX REF_NUM_BF_ELM
 #define REF_CB_BEAM(k, b) ((k)*REF_MAX_EXT11_BUNDLES + (b))
 #define REF_UL_FFT_SIZE 4096
 
@@ -615,7 +616,7 @@ static void ref_fill_codebook(oru_codebook_t *cb, bool dl, int slot)
   cb->nb_beams = REF_CB_BEAM(n_elm, 0);
   for (int k = 0; k < n_elm; k++)
     for (int b = 0; b * ref_bundle_prbs(dl, k) < tbl[k].num_prb; b++)
-      for (int t = 0; t < ORU_CODEBOOK_MAX_NB_TX; t++)
+      for (int t = 0; t < REF_NB_TX; t++)
         for (int a = 0; a < REF_NUM_ANT; a++)
           cb->w[REF_CB_BEAM(k, b)][t][a] = ref_bfw_weight(a, slot, k, b, t);
 }
@@ -637,7 +638,7 @@ static void ref_check_dl_combine(void *ctx, const dl_iq_stream_t *streams, int n
     return;
   static oru_codebook_t ref_cb;
   static dl_iq_stream_t split[MAX_DL_FRAGMENTS_PER_SYMBOL * REF_MAX_EXT11_BUNDLES];
-  static c16_t out[2][ORU_CODEBOOK_MAX_NB_TX][REF_NUM_PRB * 12];
+  static c16_t out[2][REF_NB_TX][REF_NUM_PRB * 12];
   ref_fill_codebook(&ref_cb, true, slot);
   int n_split = 0;
   for (int i = 0; i < num_streams; i++) {
@@ -658,17 +659,17 @@ static void ref_check_dl_combine(void *ctx, const dl_iq_stream_t *streams, int n
       prb = run_end;
     }
   }
-  c16_t *tx[2][ORU_CODEBOOK_MAX_NB_TX];
-  for (int t = 0; t < ORU_CODEBOOK_MAX_NB_TX; t++) {
+  c16_t *tx[2][REF_NB_TX];
+  for (int t = 0; t < REF_NB_TX; t++) {
     tx[0][t] = out[0][t];
     tx[1][t] = out[1][t];
   }
   const oru_codebook_t cb = {.nb_fh_streams = REF_NUM_ANT, .nb_beams = 1}; // every bundle has dynamic weights
   const oru_bfw_source_t src = {.ctx = ctx, .get = get_bf_weights};
   const c16_t rotation = {.r = 23170, .i = -23170};
-  combine_dl_streams(tx[0], ORU_CODEBOOK_MAX_NB_TX, REF_NUM_PRB * 12, streams, num_streams, &cb, &src, rotation);
-  combine_dl_streams(tx[1], ORU_CODEBOOK_MAX_NB_TX, REF_NUM_PRB * 12, split, n_split, &ref_cb, NULL, rotation);
-  for (int t = 0; t < ORU_CODEBOOK_MAX_NB_TX; t++)
+  combine_dl_streams(tx[0], REF_NB_TX, REF_NUM_PRB * 12, streams, num_streams, &cb, &src, rotation);
+  combine_dl_streams(tx[1], REF_NB_TX, REF_NUM_PRB * 12, split, n_split, &ref_cb, NULL, rotation);
+  for (int t = 0; t < REF_NB_TX; t++)
     for (int re = 0; re < REF_NUM_PRB * 12; re++)
       if (out[0][t][re].r != out[1][t][re].r || out[0][t][re].i != out[1][t][re].i) {
         REF_CHECK(false,
@@ -688,17 +689,17 @@ static void ref_check_dl_combine(void *ctx, const dl_iq_stream_t *streams, int n
 static void ref_check_ul_combine(void *ctx, const ul_job_t *job)
 {
   static oru_codebook_t ref_cb;
-  static c16_t fft[ORU_CODEBOOK_MAX_NB_TX][REF_UL_FFT_SIZE];
+  static c16_t fft[REF_NB_TX][REF_UL_FFT_SIZE];
   static c16_t out[2][REF_UL_FFT_SIZE];
   static bool fft_filled;
   if (!fft_filled) { // synthetic antenna FFT output
-    for (int a = 0; a < ORU_CODEBOOK_MAX_NB_TX; a++)
+    for (int a = 0; a < REF_NB_TX; a++)
       for (int n = 0; n < REF_UL_FFT_SIZE; n++)
         fft[a][n] = (c16_t){(int16_t)((n * 7 + a * 131) % 4001 - 2000), (int16_t)((n * 13 - a * 57) % 3001 - 1500)};
     fft_filled = true;
   }
-  const c16_t *fft_ptr[ORU_CODEBOOK_MAX_NB_TX];
-  for (int a = 0; a < ORU_CODEBOOK_MAX_NB_TX; a++)
+  const c16_t *fft_ptr[REF_NB_TX];
+  for (int a = 0; a < REF_NB_TX; a++)
     fft_ptr[a] = fft[a];
   int k = ref_elm_of(false, job->start_prb);
   REF_CHECK(k >= 0, "UL combine: PRB %d not in the PRB element table", job->start_prb);
@@ -711,7 +712,7 @@ static void ref_check_ul_combine(void *ctx, const ul_job_t *job)
   const oru_codebook_t cb = {.nb_fh_streams = REF_NUM_ANT, .nb_beams = 1}; // every bundle has dynamic weights
   const oru_bfw_source_t src = {.ctx = ctx, .get = get_bf_weights};
   combine_ul_beam_prbs(fft_ptr,
-                       ORU_CODEBOOK_MAX_NB_TX,
+                       REF_NB_TX,
                        REF_UL_FFT_SIZE,
                        nbins,
                        job->start_prb,
@@ -727,7 +728,7 @@ static void ref_check_ul_combine(void *ctx, const ul_job_t *job)
     int beam;
     int run_end = ref_bundle_run(false, k, prb, end, &beam);
     combine_ul_beam_prbs(fft_ptr,
-                         ORU_CODEBOOK_MAX_NB_TX,
+                         REF_NB_TX,
                          REF_UL_FFT_SIZE,
                          nbins,
                          prb,
@@ -763,10 +764,10 @@ static void ref_check_ul_combine(void *ctx, const ul_job_t *job)
 static void ref_check_prach_combine(void *ctx, const oru_bfw_set_t *set, int start_prb, int beam_id, int ant, int slot)
 {
   static oru_codebook_t ref_cb;
-  static c16_t bins[ORU_CODEBOOK_MAX_NB_TX][REF_PRACH_SEQ_LEN];
+  static c16_t bins[REF_NB_TX][REF_PRACH_SEQ_LEN];
   static c16_t out[2][REF_PRACH_SEQ_LEN];
-  const c16_t *bins_ptr[ORU_CODEBOOK_MAX_NB_TX];
-  for (int a = 0; a < ORU_CODEBOOK_MAX_NB_TX; a++) { // synthetic antenna PRACH bins
+  const c16_t *bins_ptr[REF_NB_TX];
+  for (int a = 0; a < REF_NB_TX; a++) { // synthetic antenna PRACH bins
     for (int k = 0; k < REF_PRACH_SEQ_LEN; k++)
       bins[a][k] = (c16_t){(int16_t)((k * 11 + a * 97) % 4001 - 2000), (int16_t)((k * 5 - a * 31) % 3001 - 1500)};
     bins_ptr[a] = bins[a];
@@ -775,7 +776,7 @@ static void ref_check_prach_combine(void *ctx, const oru_bfw_set_t *set, int sta
   const oru_codebook_t cb = {.nb_fh_streams = REF_NUM_ANT, .nb_beams = 1}; // every bundle has dynamic weights
   const oru_bfw_source_t src = {.ctx = ctx, .get = get_bf_weights};
   combine_ul_prach_beam(bins_ptr,
-                        ORU_CODEBOOK_MAX_NB_TX,
+                        REF_NB_TX,
                         REF_PRACH_SEQ_LEN,
                         REF_PRACH_RE_OFFSET,
                         start_prb,
@@ -790,7 +791,7 @@ static void ref_check_prach_combine(void *ctx, const oru_bfw_set_t *set, int sta
     const int b = (REF_PRACH_RE_OFFSET + k0) / 12 / bundle_prbs;
     int k1 = (b + 1) * bundle_prbs * 12 - REF_PRACH_RE_OFFSET;
     k1 = k1 < REF_PRACH_SEQ_LEN ? k1 : REF_PRACH_SEQ_LEN;
-    combine_ul_beam_fd(bins_ptr, ORU_CODEBOOK_MAX_NB_TX, k0, k1 - k0, &ref_cb, REF_CB_BEAM(0, b), ant, out[1]);
+    combine_ul_beam_fd(bins_ptr, REF_NB_TX, k0, k1 - k0, &ref_cb, REF_CB_BEAM(0, b), ant, out[1]);
     k0 = k1;
   }
   for (int k = 0; k < REF_PRACH_SEQ_LEN; k++)
