@@ -9,6 +9,9 @@
 #include <stdbool.h>
 #include <string.h>
 
+// The combine takes codebook rows and dynamic weights into the same buffer of ORU_MAX_BF_WEIGHTS
+_Static_assert(ORU_MAX_BF_WEIGHTS >= ORU_CODEBOOK_MAX_NB_TX, "a codebook row must fit a weight buffer");
+
 static void combine_passthrough(c16_t **txDataF,
                                 int nb_tx,
                                 int n_sc,
