@@ -85,12 +85,13 @@ An example configuration file can be found at
 | `eaxc_dl` | Integer Array | DL eAxC IDs as the DU sends them (cuBB `eAxC_id_pdsch`); ID `i` is DL stream `i` (codebook) or TX antenna `i` (passthrough). Up to `16` | `[]` |
 | `eaxc_ul` | Integer Array | UL eAxC IDs (cuBB `eAxC_id_pusch`); ID `i` is UL stream `i` or RX antenna `i`. Up to `16` | `[]` |
 | `eaxc_prach` | Integer Array | PRACH eAxC IDs (cuBB `eAxC_id_prach`); ID `i` is PRACH stream `i`. Up to `16` | `[]` |
+| `eaxc_srs` | Integer Array | SRS eAxC IDs (cuBB `eAxC_id_srs`); ID `i` is RX antenna `i`. SRS goes to the DU per RX antenna after the FFT, not beamformed, also in codebook mode. Not in `eaxc_ul`. Up to `64` | `[]` |
 | `ul_comp_type` | String | Static UL U-plane compression, as cuBB `ul_iq_data_fmt` `comp_meth`: `none`, `bfp`, `blkscale` or `ulaw`. When set, PUSCH and PRACH U-plane use it with no `udCompHdr`, and the C-plane `udCompHdr` is ignored (cuBB always sends `0`). `none` takes the compression from the C-plane `udCompHdr` | `none` |
 | `ul_iq_width` | Integer | IQ bit width of `ul_comp_type`, as cuBB `ul_iq_data_fmt` `bit_width` | `9` |
 | `bfw_num_weights` | Integer Array | Weight counts of the ext1/ext11 weight vectors from the DU (L_TRX), codebook mode only. Each count is from `nb_tx` to `64`, at most `4` counts, at least `4` apart. A vector is decoded with the first count that fits its length. The O-RU applies the first `nb_tx` (DL) or `nb_rx` (UL) weights. cuBB sends `num_rx_ants` dynamic weights and `64` static weights, so use for example `[32, 64]`, or `[4, 64]` on a 4-antenna cell. Write it as an array: a scalar is read as empty | `[]` (= `[nb_tx]`) |
 | `extra_eal_args` | String List | EAL arguments passed to DPDK | `[]` |
 
-With all three eAxC lists empty, the O-RU uses the RU port (the 4 low bits of the eAxC ID) as the stream index, and `prach_eaxc_offset` for PRACH. With the lists, an eAxC ID is compared on all 16 bits, as cuBB sets them, and an ID that is not in the list of its flow is dropped and counted as invalid. In both cases, the UL U-plane carries the eAxC ID of its C-plane.
+With all eAxC lists empty, the O-RU uses the RU port (the 4 low bits of the eAxC ID) as the stream index, and `prach_eaxc_offset` for PRACH. With the lists, an eAxC ID is compared on all 16 bits, as cuBB sets them, and an ID that is not in the list of its flow is dropped and counted as invalid. In both cases, the UL U-plane carries the eAxC ID of its C-plane.
 
 ### `RUs.[0]` threadpool parameters
 
