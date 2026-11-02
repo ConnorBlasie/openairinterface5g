@@ -40,6 +40,7 @@
 #define MAX_ANTENNAS NUM_RU_PORT_IDS // eAxCs (RU ports) per direction: 16 DL layers for cuBB mMIMO
 _Static_assert(ORU_MAX_EAXC_PER_KIND == MAX_ANTENNAS, "an eAxC list index is a stream or antenna index");
 #define ORU_EAXC_NONE 0xFF // eAxC ID not in the flows of a kind
+_Static_assert(ORU_MAX_SRS_EAXC < ORU_EAXC_NONE, "an SRS antenna index fits eaxc_index[]");
 #define NUM_EAXC_IDS (1 << 16)
 #define NR_NUMBER_OF_SUBFRAMES_PER_FRAME 10
 #define MAX_TDD_PATTERN_LENGTH_MS 10
@@ -434,16 +435,21 @@ void set_eaxc_lists(void *context, const oru_eaxc_lists_t *lists)
   memset(ctx->eaxc_index, ORU_EAXC_NONE, sizeof(ctx->eaxc_index));
   ctx->eaxc_key_mask = 0xFFFF;
   for (int k = 0; k < ORU_EAXC_NUM_KINDS; k++) {
-    AssertFatal(lists->num[k] >= 0 && lists->num[k] <= ORU_MAX_EAXC_PER_KIND,
+    AssertFatal(lists->num[k] >= 0 && lists->num[k] <= oru_eaxc_list_max(k),
                 "eAxC list %d has %d IDs, at most %d supported\n",
                 k,
                 lists->num[k],
-                ORU_MAX_EAXC_PER_KIND);
+                oru_eaxc_list_max(k));
     for (int i = 0; i < lists->num[k]; i++) {
       uint16_t id = lists->id[k][i];
       AssertFatal(ctx->eaxc_index[k][id] == ORU_EAXC_NONE, "eAxC ID %u is twice in eAxC list %d\n", id, k);
       ctx->eaxc_index[k][id] = i;
     }
+  }
+  // SRS and PUSCH are both UL Section Type 1: only the eAxC ID tells them apart
+  for (int i = 0; i < lists->num[ORU_EAXC_SRS]; i++) {
+    uint16_t id = lists->id[ORU_EAXC_SRS][i];
+    AssertFatal(ctx->eaxc_index[ORU_EAXC_UL][id] == ORU_EAXC_NONE, "eAxC ID %u is in the UL and the SRS eAxC lists\n", id);
   }
 }
 
@@ -879,13 +885,14 @@ static unsigned handle_dl_cplane_section(oru_packet_processor_context_t *ctx,
   return 0;
 }
 
-// Queues one UL section of eAxC ant_id as a UL job starting at target_absolute_symbol; the message has already passed
-// the timing and TDD checks. Returns the SECTION_ERR_* flags of the section.
+// Queues one UL section of eAxC ant_id (an SRS RX antenna for srs) as a UL job starting at target_absolute_symbol; the
+// message has already passed the timing and TDD checks. Returns the SECTION_ERR_* flags of the section.
 static unsigned handle_ul_cplane_section(oru_packet_processor_context_t *ctx,
                                          const struct xran_cp_radioapp_section1_header *hdr,
                                          struct xran_cp_radioapp_section1 *section,
                                          uint16_t eaxc,
                                          int ant_id,
+                                         bool srs,
                                          uint64_t target_absolute_symbol,
                                          const oru_bfw_set_t *bfw,
                                          oru_pcap_cplane_snap_t *snap)
@@ -909,6 +916,7 @@ static unsigned handle_ul_cplane_section(oru_packet_processor_context_t *ctx,
     ul_job->symbol = absolute_gps_symbol % 14;
     ul_job->num_symbols = num_symbols;
     ul_job->antenna_id = ant_id;
+    ul_job->srs = srs;
     ul_job->eaxc = eaxc;
     ul_job->beam_id = section->hdr.u.s1.beamId;
     ul_job->num_prb = section->hdr.u1.common.numPrbc == 0 ? ctx->num_prb : section->hdr.u1.common.numPrbc;
@@ -1438,6 +1446,7 @@ static void handle_section1_message(oru_packet_processor_context_t *ctx,
                                     struct xran_cp_radioapp_section1_header *hdr,
                                     uint16_t eaxc,
                                     int ant_id,
+                                    bool srs,
                                     oru_pcap_cplane_snap_t *snap)
 {
   uint8_t *sect = (void *)rte_pktmbuf_adj(pkt, sizeof(struct xran_cp_radioapp_section1_header));
@@ -1451,6 +1460,8 @@ static void handle_section1_message(oru_packet_processor_context_t *ctx,
     ctx->stats.cplane_received_dl++;
   else
     ctx->stats.cplane_received_ul++;
+  if (srs)
+    ctx->stats.cplane_received_srs++;
   if (hdr->cmnhdr.numOfSections == 0) {
     ctx->stats.cplane_err_hdr++;
     RATELIMIT(CPLANE_ERR_LOG_RATELIMIT, { LOG_W(HW, "%s CP: numOfSections is 0\n", is_dl ? "DL" : "UL"); });
@@ -1523,7 +1534,8 @@ static void handle_section1_message(oru_packet_processor_context_t *ctx,
       if (is_dl)
         errors |= handle_dl_cplane_section(ctx, section, ant_id, diff + symbol_offset, &bfw);
       else
-        errors |= handle_ul_cplane_section(ctx, hdr, section, eaxc, ant_id, target_absolute_symbol + symbol_offset, &bfw, snap);
+        errors |=
+            handle_ul_cplane_section(ctx, hdr, section, eaxc, ant_id, srs, target_absolute_symbol + symbol_offset, &bfw, snap);
     }
     // A malformed chain hides where the next section starts
     if (next == NULL)
@@ -1561,15 +1573,16 @@ void handle_cplane_packet(void *context, void *pkt)
   }
 
   switch (apphdr->sectionType) {
-    case XRAN_CP_SECTIONTYPE_1:
-      handle_section1_message(ctx,
-                              pkt,
-                              (struct xran_cp_radioapp_section1_header *)apphdr,
-                              eaxc,
-                              eaxc_index(ctx, apphdr->field.dataDirection == XRAN_DIR_DL ? ORU_EAXC_DL : ORU_EAXC_UL, eaxc),
-                              &snap);
+    case XRAN_CP_SECTIONTYPE_1: {
+      const bool is_dl = apphdr->field.dataDirection == XRAN_DIR_DL;
+      int ant_id = eaxc_index(ctx, is_dl ? ORU_EAXC_DL : ORU_EAXC_UL, eaxc);
+      const int srs_ant = is_dl ? -1 : eaxc_index(ctx, ORU_EAXC_SRS, eaxc);
+      if (srs_ant >= 0)
+        ant_id = srs_ant;
+      handle_section1_message(ctx, pkt, (struct xran_cp_radioapp_section1_header *)apphdr, eaxc, ant_id, srs_ant >= 0, &snap);
       rte_pktmbuf_free(pkt);
       return;
+    }
     case XRAN_CP_SECTIONTYPE_3: {
       ctx->stats.cplane_received_prach++;
       struct xran_cp_radioapp_section3_header *hdr = (struct xran_cp_radioapp_section3_header *)apphdr;
@@ -1630,10 +1643,11 @@ void print_packet_processor_stats(void *context)
 
   LOG_I(HW, "ORU Packet Processor Stats:\n");
   LOG_I(HW,
-        "  Total C-Plane Packets received: %lu (DL: %lu, UL: %lu, PRACH: %lu, Other: %lu)\n",
+        "  Total C-Plane Packets received: %lu (DL: %lu, UL: %lu of which SRS: %lu, PRACH: %lu, Other: %lu)\n",
         ctx->stats.total_cplane,
         ctx->stats.cplane_received_dl,
         ctx->stats.cplane_received_ul,
+        ctx->stats.cplane_received_srs,
         ctx->stats.cplane_received_prach,
         ctx->stats.cplane_received_other);
   LOG_I(HW, "  Total U-Plane Packets received: %lu\n", ctx->stats.total_uplane_received);
@@ -1998,7 +2012,7 @@ void write_ul_iq(void *context, uint32_t *rxdataF, int symbol, const ul_job_t *j
   atomic_fetch_add_explicit(&ctx->thread_safe_stats.ul_uplane_ota_delay_count, 1, memory_order_relaxed);
 
   int aarx = job->antenna_id;
-  if (aarx < 0 || aarx >= MAX_ANTENNAS) {
+  if (aarx < 0 || aarx >= (job->srs ? ORU_MAX_SRS_EAXC : MAX_ANTENNAS)) {
     LOG_W(HW, "ORU: Invalid antenna index %d\n", aarx);
     return;
   }

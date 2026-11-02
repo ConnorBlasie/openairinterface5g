@@ -26,16 +26,23 @@ extern "C" {
 // packed back to back and admitted only while their PRB total fits, whatever the fragment count.
 #define DL_IQ_ARENA_PRBS(num_prb) (MAX_DL_STREAMS_PER_SYMBOL * (num_prb))
 #define ORU_MAX_EAXC_PER_KIND 16 // eAxC IDs of one flow kind: DL streams, UL streams or PRACH streams
+#define ORU_MAX_SRS_EAXC 64 // SRS eAxC IDs: one per RX antenna, up to a 64R mMIMO RU
 
-// Flow kinds of the eAxC lists, each with its own eAxC ID space: DL Section Type 1, UL Section Type 1, Section Type 3
-typedef enum { ORU_EAXC_DL, ORU_EAXC_UL, ORU_EAXC_PRACH, ORU_EAXC_NUM_KINDS } oru_eaxc_kind_t;
+// Flow kinds of the eAxC lists, each with its own eAxC ID space: DL Section Type 1, UL Section Type 1, Section Type 3,
+// and SRS, which cuBB sends as UL Section Type 1 on eAxC IDs of its own
+typedef enum { ORU_EAXC_DL, ORU_EAXC_UL, ORU_EAXC_PRACH, ORU_EAXC_SRS, ORU_EAXC_NUM_KINDS } oru_eaxc_kind_t;
 
-// eAxC IDs as the O-DU assigns them, e.g. cuBB's eAxC_id_pdsch, eAxC_id_pusch and eAxC_id_prach. ID i of a kind is
-// stream (or antenna) i of that kind.
+// eAxC IDs as the O-DU assigns them, e.g. cuBB's eAxC_id_pdsch, eAxC_id_pusch, eAxC_id_prach and eAxC_id_srs. ID i of
+// a kind is stream (or antenna) i of that kind. ID i of the SRS list is always RX antenna i.
 typedef struct {
   int num[ORU_EAXC_NUM_KINDS];
-  uint16_t id[ORU_EAXC_NUM_KINDS][ORU_MAX_EAXC_PER_KIND];
+  uint16_t id[ORU_EAXC_NUM_KINDS][ORU_MAX_SRS_EAXC];
 } oru_eaxc_lists_t;
+
+static inline int oru_eaxc_list_max(oru_eaxc_kind_t kind)
+{
+  return kind == ORU_EAXC_SRS ? ORU_MAX_SRS_EAXC : ORU_MAX_EAXC_PER_KIND;
+}
 
 // Dynamic beamforming weights of one section (CUS 12.4.3)
 // Read per PRB bundle with get_bf_weights();
@@ -88,7 +95,8 @@ typedef struct {
   int slot_in_frame;
   int symbol;
   int num_symbols;
-  int antenna_id; // eaxc: physical RX antenna (passthrough) or beam output stream (codebook)
+  int antenna_id; // eaxc: physical RX antenna (passthrough or SRS) or beam output stream (codebook)
+  bool srs; // SRS eAxC: sent per RX antenna and not beamformed, also in codebook mode
   uint16_t eaxc; // eAxC ID of the C-Plane, echoed in the U-Plane
   uint16_t beam_id; // beam this section was declared under (UL Rx beamforming)
   int start_prb;
@@ -101,6 +109,7 @@ typedef struct {
   uint64_t cplane_received_dl;
   uint64_t cplane_received_ul;
   uint64_t cplane_received_prach;
+  uint64_t cplane_received_srs; // UL Section Type 1 on an SRS eAxC, also counted in cplane_received_ul
   uint64_t cplane_received_other;
   uint64_t total_uplane_received;
   uint64_t total_uplane_sent;

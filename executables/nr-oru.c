@@ -108,6 +108,7 @@
 #define CONFIG_STRING_EAXC_DL "eaxc_dl"
 #define CONFIG_STRING_EAXC_UL "eaxc_ul"
 #define CONFIG_STRING_EAXC_PRACH "eaxc_prach"
+#define CONFIG_STRING_EAXC_SRS "eaxc_srs"
 
 #define HLP_DPDK_DEVICES "DPDK devices to use for the O-RU."
 #define HLP_RX_CORE "The CPU core to be used to deploy dpdk RX worker for O-RU."
@@ -132,6 +133,7 @@
 #define HLP_EAXC_DL "DL eAxC IDs, e.g. cuBB eAxC_id_pdsch; ID i is DL stream (or TX antenna) i. Empty: RU port layout."
 #define HLP_EAXC_UL "UL eAxC IDs, e.g. cuBB eAxC_id_pusch; ID i is UL stream (or RX antenna) i. Empty: RU port layout."
 #define HLP_EAXC_PRACH "PRACH eAxC IDs, e.g. cuBB eAxC_id_prach; ID i is PRACH stream i. Empty: prach_eaxc_offset."
+#define HLP_EAXC_SRS "SRS eAxC IDs, e.g. cuBB eAxC_id_srs; ID i is RX antenna i, not beamformed. Empty: no SRS."
 #define HLP_CLOCK_TIMEBASE \
   "Timescale of CLOCK_REALTIME for FH GPS mapping: utc (default, GPS = unix - epoch + 18) or tai (GPS = unix - epoch - 19)."
 
@@ -169,7 +171,8 @@
   {CONFIG_STRING_BFW_NUM_WEIGHTS,            HLP_BFW_NUM_WEIGHTS,   0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}, \
   {CONFIG_STRING_EAXC_DL,                    HLP_EAXC_DL,           0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}, \
   {CONFIG_STRING_EAXC_UL,                    HLP_EAXC_UL,           0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}, \
-  {CONFIG_STRING_EAXC_PRACH,                 HLP_EAXC_PRACH,        0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}  \
+  {CONFIG_STRING_EAXC_PRACH,                 HLP_EAXC_PRACH,        0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}, \
+  {CONFIG_STRING_EAXC_SRS,                   HLP_EAXC_SRS,          0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}  \
 }
 // clang-format on
 
@@ -199,7 +202,9 @@ static void dispatch_ul_fft(work_q_t *fft_q,
 // O(1) instead of a linear scan, and the per-symbol tick drains exactly the jobs due now.
 //
 #define UL_CAL_SLOTS 4 // Number of slots ahead in the UL calendar ring
-#define UL_CAL_JOBS_PER_SYMBOL 32 // one per C-Plane section and stream starting on a symbol
+// One per C-Plane section and stream starting on a symbol. cuBB sends SRS as one section per SRS eAxC and PRB run of
+// at most 255 PRBs: 128 jobs for 64 RX antennas on 273 PRBs, plus PUSCH.
+#define UL_CAL_JOBS_PER_SYMBOL 256
 
 typedef struct {
   ul_job_t job;
@@ -555,15 +560,18 @@ int get_oru_options(ORU_t *oru)
   fh_cfg->prach_eaxc_offset = *gpd(fh_param, nump, CONFIG_STRING_PRACH_EAXC_OFFSET)->u8ptr;
   fh_cfg->prach_kbar = *gpd(fh_param, nump, CONFIG_STRING_PRACH_KBAR)->uptr;
   // eAxC lists: the eAxC IDs the O-DU assigns (CUS 5.1.3.2.7). Without them, the RU port is the stream index.
-  const char *eaxc_names[ORU_EAXC_NUM_KINDS] = {CONFIG_STRING_EAXC_DL, CONFIG_STRING_EAXC_UL, CONFIG_STRING_EAXC_PRACH};
+  const char *eaxc_names[ORU_EAXC_NUM_KINDS] = {CONFIG_STRING_EAXC_DL,
+                                                CONFIG_STRING_EAXC_UL,
+                                                CONFIG_STRING_EAXC_PRACH,
+                                                CONFIG_STRING_EAXC_SRS};
   int num_eaxc = 0;
   for (int k = 0; k < ORU_EAXC_NUM_KINDS; k++) {
     const paramdef_t *list = gpd(fh_param, nump, eaxc_names[k]);
-    AssertFatal(list->numelt <= ORU_MAX_EAXC_PER_KIND,
+    AssertFatal(list->numelt <= oru_eaxc_list_max(k),
                 "%s has %d eAxC IDs, at most %d supported\n",
                 eaxc_names[k],
                 list->numelt,
-                ORU_MAX_EAXC_PER_KIND);
+                oru_eaxc_list_max(k));
     fh_cfg->eaxc_lists.num[k] = list->numelt;
     for (int i = 0; i < list->numelt; i++) {
       AssertFatal(list->iptr[i] >= 0 && list->iptr[i] <= UINT16_MAX, "%s: eAxC ID %d out of range\n", eaxc_names[k], list->iptr[i]);
@@ -572,11 +580,12 @@ int get_oru_options(ORU_t *oru)
     num_eaxc += list->numelt;
   }
   AssertFatal(num_eaxc == 0 || fh_cfg->prach_eaxc_offset == 0,
-              "Set %s or the eAxC lists (%s, %s, %s), not both\n",
+              "Set %s or the eAxC lists (%s, %s, %s, %s), not both\n",
               CONFIG_STRING_PRACH_EAXC_OFFSET,
               CONFIG_STRING_EAXC_DL,
               CONFIG_STRING_EAXC_UL,
-              CONFIG_STRING_EAXC_PRACH);
+              CONFIG_STRING_EAXC_PRACH,
+              CONFIG_STRING_EAXC_SRS);
   // Codebook mode also applies ext1/ext11 weights from the DU. The DU can send more weights than TXRUs, and more than one
   // count: cuBB sends num_rx_ants dynamic weights and 64 static ones. The combine applies the first nb_tx (DL) or nb_rx
   // (UL).
@@ -1019,7 +1028,8 @@ static void receive_pusch(ORU_t *oru, int frame, int slot, int symbol, ul_job_t 
   NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
   int aarx = job->antenna_id;
   const oru_codebook_t *cb = &oru->codebook;
-  const bool beamforming = cb->nb_fh_streams > 0;
+  // SRS goes to the DU per RX antenna, after the FFT and before the combine: the DU estimates H from it
+  const bool beamforming = cb->nb_fh_streams > 0 && !job->srs;
 
   if (beamforming) {
     // Codebook mode: the section's eaxc is the beam output stream, not a physical antenna.
@@ -1424,7 +1434,7 @@ void *oru_south_read_thread(void *arg)
   AssertFatal(work_q_alloc(&fft_queue, UL_FFT_QUEUE_DEPTH, ul_fft_item_size(fft_payload)),
               "[ORU south] failed to allocate UL FFT queue\n");
 
-  ul_calendar_t ul_cal = {0};
+  ul_calendar_t *ul_cal = calloc_or_fail(1, sizeof(*ul_cal)); // about 1.4 MB: too big for the thread stack
 
   while (!oai_exit) {
     int rx_slot_type = nr_slot_select(&ru->config, frame, slot);
@@ -1452,12 +1462,12 @@ void *oru_south_read_thread(void *arg)
       const uint64_t reader_abs = ((uint64_t)frame * fp->slots_per_frame + slot) * NR_SYMBOLS_PER_SLOT + symbol;
       ul_job_t new_job;
       while (oru_fh_poll_ul_job(oru->fronthaul, &new_job) == 0) {
-        ul_calendar_add(&ul_cal, &beam_queue, &fft_queue, oru, reader_abs, &new_job);
+        ul_calendar_add(ul_cal, &beam_queue, &fft_queue, oru, reader_abs, &new_job);
       }
 
       if (rx_slot_type == NR_UPLINK_SLOT || rx_slot_type == NR_MIXED_SLOT) {
         // Dispatch the jobs parked on this symbol's calendar entry
-        ul_calendar_tick(&ul_cal, &beam_queue, &fft_queue, oru, reader_abs);
+        ul_calendar_tick(ul_cal, &beam_queue, &fft_queue, oru, reader_abs);
       }
       int prach_symbol = get_prach_symbol(oru, frame, slot, symbol, ru->numerology);
       if (prach_symbol != -1)
@@ -1473,6 +1483,7 @@ void *oru_south_read_thread(void *arg)
     }
   }
 
+  free(ul_cal);
   return NULL;
 }
 
