@@ -24,6 +24,17 @@ extern "C" {
 // PRBs of IQ scratch read_dl_iq_streams() needs: one full band per (eaxc, beam) pair. Fragments are
 // packed back to back and admitted only while their PRB total fits, whatever the fragment count.
 #define DL_IQ_ARENA_PRBS(num_prb) (MAX_DL_STREAMS_PER_SYMBOL * (num_prb))
+#define ORU_MAX_EAXC_PER_KIND 16 // eAxC IDs of one flow kind: DL streams, UL streams or PRACH streams
+
+// Flow kinds of the eAxC lists, each with its own eAxC ID space: DL Section Type 1, UL Section Type 1, Section Type 3
+typedef enum { ORU_EAXC_DL, ORU_EAXC_UL, ORU_EAXC_PRACH, ORU_EAXC_NUM_KINDS } oru_eaxc_kind_t;
+
+// eAxC IDs as the O-DU assigns them, e.g. cuBB's eAxC_id_pdsch, eAxC_id_pusch and eAxC_id_prach. ID i of a kind is
+// stream (or antenna) i of that kind.
+typedef struct {
+  int num[ORU_EAXC_NUM_KINDS];
+  uint16_t id[ORU_EAXC_NUM_KINDS][ORU_MAX_EAXC_PER_KIND];
+} oru_eaxc_lists_t;
 
 // Dynamic beamforming weights of one section (CUS 12.4.3)
 // Read per PRB bundle with get_bf_weights();
@@ -175,6 +186,8 @@ void cleanup_packet_processor(void *context);
 void set_bf_weight_counts(void *context, const int *counts, int num_counts);
 // set_bf_weight_counts() with the one count num_bf_weights, or none for 0
 void set_num_bf_weights(void *context, int num_bf_weights);
+// Replaces the default eAxC layout (RU port, PRACH from prach_eaxc_offset) with the eAxC IDs of lists
+void set_eaxc_lists(void *context, const oru_eaxc_lists_t *lists);
 void handle_absolute_symbol_tick(void *context, uint64_t absolute_symbol);
 void handle_uplane_packet(void *context, void *pkt);
 void handle_cplane_packet(void *context, void *pkt);
