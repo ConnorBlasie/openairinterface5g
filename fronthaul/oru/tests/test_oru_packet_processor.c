@@ -1957,6 +1957,73 @@ void test_eaxc_lists(void)
   printf("eAxC lists passed!\n");
 }
 
+// SRS as cuBB mMIMO sends it: UL Section Type 1 on eAxC IDs 32..95, one per RX antenna, next to PUSCH on 0..15
+void test_srs_eaxc_list(void)
+{
+  printf("Testing the SRS eAxC list...\n");
+  void *ctx = init_packet_processor(1,
+                                    100,
+                                    200,
+                                    400,
+                                    100,
+                                    300,
+                                    2,
+                                    2,
+                                    0,
+                                    0,
+                                    5,
+                                    test_alloc_mbuf,
+                                    test_send_mbuf_eaxc,
+                                    NULL,
+                                    1500,
+                                    0,
+                                    FH_COMP_NONE,
+                                    TEST_PRACH_KBAR);
+  assert(ctx != NULL);
+  oru_eaxc_lists_t lists = {.num = {16, 16, 16, ORU_MAX_SRS_EAXC}};
+  for (int i = 0; i < 16; i++) {
+    lists.id[ORU_EAXC_DL][i] = i;
+    lists.id[ORU_EAXC_UL][i] = i;
+    lists.id[ORU_EAXC_PRACH][i] = 16 + i;
+  }
+  for (int i = 0; i < ORU_MAX_SRS_EAXC; i++)
+    lists.id[ORU_EAXC_SRS][i] = 32 + i;
+  set_eaxc_lists(ctx, &lists);
+  // Pattern: 5 slots, 2 DL, 2 UL. Symbols 0-27 DL, 42-69 UL.
+  const uint64_t cur_sym = 1030;
+  handle_absolute_symbol_tick(ctx, cur_sym);
+  const uint64_t target_sym = cur_sym + 5;
+  static uint32_t iq[100 * 12];
+  oru_packet_processor_stats_t stats;
+
+  // SRS on eAxC 95 is RX antenna 63, beyond the 16 UL streams, and its U-Plane goes out on eAxC 95
+  g_packets_sent = 0;
+  send_cplane_on_eaxc(ctx, 95, XRAN_CP_SECTIONTYPE_1, XRAN_DIR_UL, target_sym);
+  ul_job_t job;
+  assert(poll_ul_job(ctx, &job) == 0);
+  assert(job.srs && job.antenna_id == 63 && job.eaxc == 95);
+  write_ul_iq(ctx, iq, target_sym % 14, &job);
+  assert(g_packets_sent == 1 && g_last_eaxc == 95);
+
+  // PUSCH on eAxC 15 stays UL stream 15
+  send_cplane_on_eaxc(ctx, 15, XRAN_CP_SECTIONTYPE_1, XRAN_DIR_UL, target_sym);
+  assert(poll_ul_job(ctx, &job) == 0);
+  assert(!job.srs && job.antenna_id == 15 && job.eaxc == 15);
+
+  get_packet_processor_stats(ctx, &stats);
+  assert(stats.cplane_received_ul == 2 && stats.cplane_received_srs == 1 && stats.invalid_eaxc_id == 0);
+
+  // SRS eAxC IDs are UL only: DL on eAxC 32 is invalid
+  const uint64_t dl_sym = 1050; // first DL symbol of the next pattern
+  handle_absolute_symbol_tick(ctx, dl_sym - 7);
+  send_cplane_on_eaxc(ctx, 32, XRAN_CP_SECTIONTYPE_1, XRAN_DIR_DL, dl_sym);
+  get_packet_processor_stats(ctx, &stats);
+  assert(stats.invalid_eaxc_id == 1 && stats.cplane_received_srs == 1);
+
+  cleanup_packet_processor(ctx);
+  printf("SRS eAxC list passed!\n");
+}
+
 static uint8_t g_last_pkt[9600];
 static uint32_t g_last_pkt_len;
 
@@ -4304,6 +4371,7 @@ int main(int argc, char **argv)
   usleep(10000);
   test_ul_eaxc_echo();
   test_eaxc_lists();
+  test_srs_eaxc_list();
   test_ul_static_compression();
   test_prach_generation(4, false);
   const int offsets[] = {0, 1, 4, 15};
