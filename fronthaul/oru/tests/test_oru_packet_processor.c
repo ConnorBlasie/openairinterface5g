@@ -20,6 +20,14 @@
 #include "log.h"
 #include "common/config/config_userapi.h"
 
+// The RU port eAxC layout, as nr-oru builds it without eAxC lists. init_packet_processor() copies it.
+static const oru_eaxc_lists_t *ru_ports(int prach_eaxc_offset)
+{
+  static oru_eaxc_lists_t lists;
+  lists = oru_eaxc_ru_port_lists(prach_eaxc_offset);
+  return &lists;
+}
+
 // OAI Linkage Satisfiers
 void exit_function(const char *file, const char *function, const int line, const char *s, const int assertflag)
 {
@@ -127,7 +135,7 @@ void test_init_cleanup()
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -157,7 +165,7 @@ void test_cplane_timing_errors()
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -235,7 +243,7 @@ void test_cplane_uplane_match()
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -360,7 +368,24 @@ void test_uplane_prb_range_rejected()
 {
   printf("Testing U-Plane PRB range rejection...\n");
   int mu = 1;
-  void *ctx = init_packet_processor(mu, 273, 200, 400, 100, 300, 2, 2, 0, 0, 5, test_alloc_mbuf, test_send_mbuf, NULL, 1500, 0, FH_COMP_NONE, 0);
+  void *ctx = init_packet_processor(mu,
+                                    273,
+                                    200,
+                                    400,
+                                    100,
+                                    300,
+                                    2,
+                                    2,
+                                    0,
+                                    0,
+                                    5,
+                                    test_alloc_mbuf,
+                                    test_send_mbuf,
+                                    NULL,
+                                    1500,
+                                    ru_ports(0),
+                                    FH_COMP_NONE,
+                                    0);
   assert(ctx != NULL);
 
   uint64_t current_sym = 1000;
@@ -405,7 +430,24 @@ void test_uplane_short_payload_rejected()
 {
   printf("Testing U-Plane short payload rejection...\n");
   int mu = 1;
-  void *ctx = init_packet_processor(mu, 273, 200, 400, 100, 300, 2, 2, 0, 0, 5, test_alloc_mbuf, test_send_mbuf, NULL, 1500, 0, FH_COMP_NONE, 0);
+  void *ctx = init_packet_processor(mu,
+                                    273,
+                                    200,
+                                    400,
+                                    100,
+                                    300,
+                                    2,
+                                    2,
+                                    0,
+                                    0,
+                                    5,
+                                    test_alloc_mbuf,
+                                    test_send_mbuf,
+                                    NULL,
+                                    1500,
+                                    ru_ports(0),
+                                    FH_COMP_NONE,
+                                    0);
   assert(ctx != NULL);
 
   uint64_t current_sym = 1000;
@@ -467,7 +509,7 @@ void test_dl_multi_section_same_beam()
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -689,7 +731,7 @@ void test_frame_wrap_around()
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -851,7 +893,7 @@ void test_cplane_14_symbols()
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -979,7 +1021,7 @@ void test_other_bw_16ant_prb_offset()
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -1125,7 +1167,7 @@ void test_dl_wideband_fragments_4ant()
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -1419,7 +1461,7 @@ void test_uplink_basic()
                                     test_send_mbuf_no_frag,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -1512,7 +1554,7 @@ void test_uplink_fragmentation()
                                     test_send_mbuf_frag,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -1606,7 +1648,7 @@ void test_uplink_large_mtu()
                                     test_send_mbuf_large_mtu,
                                     NULL,
                                     9600,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -1699,7 +1741,7 @@ void test_uplink_prb_offset()
                                     test_send_mbuf_prb_offset,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -1853,7 +1895,7 @@ void test_ul_eaxc_du_port(void)
                                     test_send_mbuf_eaxc,
                                     NULL,
                                     1500,
-                                    1,
+                                    ru_ports(1),
                                     FH_COMP_NONE,
                                     TEST_PRACH_KBAR);
   assert(ctx != NULL);
@@ -1883,10 +1925,33 @@ void test_ul_eaxc_du_port(void)
   printf("UL U-Plane eAxC DU_Port_ID passed!\n");
 }
 
+// The RU port layout compares only the RU port bits, and PRACH starts at prach_eaxc_offset
+void test_eaxc_ru_port_lists(void)
+{
+  printf("Testing the RU port eAxC layout...\n");
+  static oru_eaxc_map_t map;
+  oru_eaxc_lists_t lists = oru_eaxc_ru_port_lists(2);
+  oru_eaxc_map_init(&map, &lists);
+  oru_flow_t flow = oru_eaxc_classify(&map, false, false, 0x1203);
+  assert(flow.kind == ORU_EAXC_UL && flow.index == 3 && flow.eaxc == 0x1203);
+  flow = oru_eaxc_classify(&map, false, true, 0x000F);
+  assert(flow.kind == ORU_EAXC_DL && flow.index == 15);
+  assert(oru_eaxc_classify(&map, true, false, 0x0003).index == 1);
+  assert(oru_eaxc_classify(&map, true, false, 0x0001).index == -1);
+  assert(oru_eaxc_index(&map, ORU_EAXC_SRS, 0x0003) == -1);
+  printf("RU port eAxC layout passed!\n");
+}
+
 // eAxC lists as cuBB mMIMO assigns them: PDSCH and PUSCH on 0..15, PRACH on 16..31, compared on all 16 bits
 void test_eaxc_lists(void)
 {
   printf("Testing eAxC lists...\n");
+  oru_eaxc_lists_t lists = {.key_mask = 0xFFFF, .num = {16, 16, 16}};
+  for (int i = 0; i < 16; i++) {
+    lists.id[ORU_EAXC_DL][i] = i;
+    lists.id[ORU_EAXC_UL][i] = i;
+    lists.id[ORU_EAXC_PRACH][i] = 16 + i;
+  }
   void *ctx = init_packet_processor(1,
                                     100,
                                     200,
@@ -1902,17 +1967,10 @@ void test_eaxc_lists(void)
                                     test_send_mbuf_eaxc,
                                     NULL,
                                     1500,
-                                    0,
+                                    &lists,
                                     FH_COMP_NONE,
                                     TEST_PRACH_KBAR);
   assert(ctx != NULL);
-  oru_eaxc_lists_t lists = {.num = {16, 16, 16}};
-  for (int i = 0; i < 16; i++) {
-    lists.id[ORU_EAXC_DL][i] = i;
-    lists.id[ORU_EAXC_UL][i] = i;
-    lists.id[ORU_EAXC_PRACH][i] = 16 + i;
-  }
-  set_eaxc_lists(ctx, &lists);
   // Pattern: 5 slots, 2 DL, 2 UL. Symbols 0-27 DL, 42-69 UL.
   const uint64_t cur_sym = 1030;
   handle_absolute_symbol_tick(ctx, cur_sym);
@@ -1978,7 +2036,7 @@ void test_prach_generation(int prach_eaxc_offset, bool check_sequence)
                                     check_sequence ? test_send_mbuf_sequence : test_send_mbuf_prach,
                                     expected_sequence,
                                     1500,
-                                    prach_eaxc_offset,
+                                    ru_ports(prach_eaxc_offset),
                                     FH_COMP_NONE,
                                     TEST_PRACH_KBAR);
   assert(ctx != NULL);
@@ -2120,7 +2178,7 @@ void test_hyper_frame_calculation()
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -2233,11 +2291,24 @@ void test_dl_bfp_decompression(void)
   int8_t pre_compressed[FH_COMP_PRB_BYTES(iq_bits)];
   fh_compress_prbs(FH_COMP_BFP, iq_bits, n_prb, src_iq, pre_compressed);
 
-  void *ctx = init_packet_processor(mu, 273, 200, 400, 100, 300,
-                                    2, 2, 0, 0, 5,
-                                    test_alloc_mbuf, test_send_mbuf,
-                                    NULL, 1500, 0,
-                                    FH_COMP_BFP, 0);
+  void *ctx = init_packet_processor(mu,
+                                    273,
+                                    200,
+                                    400,
+                                    100,
+                                    300,
+                                    2,
+                                    2,
+                                    0,
+                                    0,
+                                    5,
+                                    test_alloc_mbuf,
+                                    test_send_mbuf,
+                                    NULL,
+                                    1500,
+                                    ru_ports(0),
+                                    FH_COMP_BFP,
+                                    0);
   assert(ctx != NULL);
 
   uint64_t current_sym = 1000;
@@ -2347,10 +2418,22 @@ void test_ul_bfp_compression(void)
   memset(g_ul_recovered_iq, 0, sizeof(g_ul_recovered_iq));
 
   g_packets_sent = 0;
-  void *ctx = init_packet_processor(mu, 100, 200, 400, 100, 300,
-                                    2, 2, 0, 0, 5,
-                                    test_alloc_mbuf, test_send_mbuf_ul_bfp,
-                                    NULL, 1500, 0,
+  void *ctx = init_packet_processor(mu,
+                                    100,
+                                    200,
+                                    400,
+                                    100,
+                                    300,
+                                    2,
+                                    2,
+                                    0,
+                                    0,
+                                    5,
+                                    test_alloc_mbuf,
+                                    test_send_mbuf_ul_bfp,
+                                    NULL,
+                                    1500,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -2430,7 +2513,24 @@ void test_large_delay_profile()
   // 10 slots = 140 symbols = 5000 uS.
   // We configure T2a_cp_max = 5000 uS (140 symbols) and T2a_up_max = 5000 uS (140 symbols)
   // Let's set T2a_cp_min = 200 uS, T2a_cp_max = 5000 uS, T2a_up_min = 100 uS, T2a_up_max = 5000 uS.
-  void *ctx = init_packet_processor(mu, 273, 200, 5000, 100, 5000, 2, 2, 0, 0, 5, test_alloc_mbuf, test_send_mbuf, NULL, 1500, 0, FH_COMP_NONE, 0);
+  void *ctx = init_packet_processor(mu,
+                                    273,
+                                    200,
+                                    5000,
+                                    100,
+                                    5000,
+                                    2,
+                                    2,
+                                    0,
+                                    0,
+                                    5,
+                                    test_alloc_mbuf,
+                                    test_send_mbuf,
+                                    NULL,
+                                    1500,
+                                    ru_ports(0),
+                                    FH_COMP_NONE,
+                                    0);
   assert(ctx != NULL);
 
   uint64_t current_sym = 1000;
@@ -2589,7 +2689,7 @@ void test_cplane_section_extension_1(void)
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -2699,7 +2799,7 @@ void test_cplane_section_extension_11(void)
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -2779,7 +2879,7 @@ void test_cplane_section_extension_11_buffer_size(void)
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -2843,7 +2943,7 @@ void test_cplane_section_extension_other(void)
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -2988,7 +3088,7 @@ void test_dl_multi_section_message(void)
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -3063,7 +3163,7 @@ static void *init_ul_test_ctx(void)
                                     test_send_mbuf_no_frag,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -3204,7 +3304,7 @@ void test_section_id_repeated(void)
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -3339,7 +3439,7 @@ void test_section_sym_inc(void)
                                     test_send_mbuf,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     0);
   assert(ctx != NULL);
@@ -3424,7 +3524,7 @@ static void *init_prach_test_ctx(void)
                                     test_send_mbuf_prach_section_id,
                                     NULL,
                                     1500,
-                                    0,
+                                    ru_ports(0),
                                     FH_COMP_NONE,
                                     TEST_PRACH_KBAR);
   assert(ctx != NULL);
@@ -3634,6 +3734,7 @@ int main(int argc, char **argv)
   test_uplink_large_mtu();
   usleep(10000);
   test_ul_eaxc_du_port();
+  test_eaxc_ru_port_lists();
   test_eaxc_lists();
   test_prach_generation(4, false);
   const int offsets[] = {0, 1, 4, 15};
