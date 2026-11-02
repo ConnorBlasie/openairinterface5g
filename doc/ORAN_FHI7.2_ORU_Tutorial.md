@@ -81,9 +81,14 @@ An example configuration file can be found at
 | `T2a_up` | Int Array (2) | Timing window bounds `(T2a_up_min, T2a_up_max)` | **Mandatory** |
 | `T2a_cp` | Int Array (2) | Timing window bounds `(T2a_cp_min, T2a_cp_max)` | **Mandatory** |
 | `mtu` | Integer | Maximum Transmission Unit (MTU) | `9600` |
-| `prach_eaxc_offset`| Integer | Offset for PRACH eAxC ID mapping | `0` |
+| `prach_eaxc_offset`| Integer | Offset for PRACH eAxC ID mapping: PRACH stream `i` is on RU port `prach_eaxc_offset + i`. Do not set it with the eAxC lists | `0` |
+| `eaxc_dl` | Integer Array | DL eAxC IDs as the DU sends them (cuBB `eAxC_id_pdsch`); ID `i` is DL stream `i` (codebook) or TX antenna `i` (passthrough). Up to `16` | `[]` |
+| `eaxc_ul` | Integer Array | UL eAxC IDs (cuBB `eAxC_id_pusch`); ID `i` is UL stream `i` or RX antenna `i`. Up to `16` | `[]` |
+| `eaxc_prach` | Integer Array | PRACH eAxC IDs (cuBB `eAxC_id_prach`); ID `i` is PRACH stream `i`. Up to `16` | `[]` |
 | `bfw_num_weights` | Integer Array | Weight counts of the ext1/ext11 weight vectors from the DU (L_TRX), codebook mode only. Each count is from `nb_tx` to `64`, at most `4` counts, at least `4` apart. A vector is decoded with the first count that fits its length. The O-RU applies the first `nb_tx` (DL) or `nb_rx` (UL) weights. cuBB sends `num_rx_ants` dynamic weights and `64` static weights, so use for example `[32, 64]`, or `[4, 64]` on a 4-antenna cell. Write it as an array: a scalar is read as empty | `[]` (= `[nb_tx]`) |
 | `extra_eal_args` | String List | EAL arguments passed to DPDK | `[]` |
+
+With all three eAxC lists empty, the O-RU uses the RU port (the 4 low bits of the eAxC ID) as the stream index, and `prach_eaxc_offset` for PRACH. With the lists, an eAxC ID is compared on all 16 bits, as cuBB sets them, and an ID that is not in the list of its flow is dropped and counted as invalid. In both cases, the UL U-plane carries the eAxC ID of its C-plane.
 
 ### `RUs.[0]` threadpool parameters
 
