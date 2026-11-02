@@ -6,6 +6,7 @@
 
 #include "fh_compression.h"
 #include "common/platform_types.h"
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -77,6 +78,7 @@ typedef struct {
   int section_id;
   int comp_method;
   int iq_width;
+  bool comp_hdr; // udCompHdr in each U-Plane section: compression from the C-Plane, not static
 } opaque_response_data_t;
 
 typedef struct {
@@ -188,6 +190,9 @@ void set_bf_weight_counts(void *context, const int *counts, int num_counts);
 void set_num_bf_weights(void *context, int num_bf_weights);
 // Replaces the default eAxC layout (RU port, PRACH from prach_eaxc_offset) with the eAxC IDs of lists
 void set_eaxc_lists(void *context, const oru_eaxc_lists_t *lists);
+// Static UL compression (M-Plane): UL and PRACH U-Plane use method and iq_width with no udCompHdr, whatever the C-Plane
+// udCompHdr says. FH_COMP_NONE (the default) takes the compression from the C-Plane udCompHdr.
+void set_ul_static_compression(void *context, fh_comp_method_t method, int iq_width);
 void handle_absolute_symbol_tick(void *context, uint64_t absolute_symbol);
 void handle_uplane_packet(void *context, void *pkt);
 void handle_cplane_packet(void *context, void *pkt);

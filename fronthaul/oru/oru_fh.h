@@ -27,6 +27,8 @@ typedef struct {
 
 typedef struct {
   fh_comp_method_t comp_type;
+  fh_comp_method_t ul_comp_type; // static UL compression; FH_COMP_NONE: from the C-Plane udCompHdr
+  int ul_iq_width;
   int numerology;
   uint16_t num_prbs;
   // MTU configuration
