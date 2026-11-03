@@ -103,6 +103,8 @@
 #define CONFIG_STRING_COMP_TYPE         "comp_type"
 #define CONFIG_STRING_UL_COMP_TYPE "ul_comp_type"
 #define CONFIG_STRING_UL_IQ_WIDTH "ul_iq_width"
+#define CONFIG_STRING_DL_COMP_TYPE "dl_comp_type"
+#define CONFIG_STRING_DL_IQ_WIDTH "dl_iq_width"
 #define CONFIG_STRING_CLOCK_TIMEBASE    "clock_timebase"
 #define CONFIG_STRING_BFW_NUM_WEIGHTS "bfw_num_weights"
 #define CONFIG_STRING_EAXC_DL "eaxc_dl"
@@ -127,6 +129,9 @@
 #define HLP_UL_COMP_TYPE \
   "Static UL U-plane compression (cuBB ul_iq_data_fmt): none (default, from the C-plane udCompHdr), bfp, blkscale, or ulaw."
 #define HLP_UL_IQ_WIDTH "IQ bit width of the static UL compression (cuBB ul_iq_data_fmt bit_width)."
+#define HLP_DL_COMP_TYPE \
+  "Static DL U-plane compression (cuBB dl_iq_data_fmt): none (default, from the U-plane udCompHdr), bfp, blkscale, or ulaw."
+#define HLP_DL_IQ_WIDTH "IQ bit width of the static DL compression (cuBB dl_iq_data_fmt bit_width)."
 #define HLP_BFW_NUM_WEIGHTS                                                                                                \
   "Weight counts of the ext1/ext11 vectors from the DU (L_TRX), e.g. [32, 64] for cuBB dynamic and static weights; empty " \
   "= [nb_tx]. The O-RU applies the first nb_tx (DL) or nb_rx (UL)."
@@ -167,6 +172,8 @@
   {CONFIG_STRING_COMP_TYPE,                  HLP_COMP_TYPE,         0,                      .strptr=NULL,     .defstrval="none",           TYPE_STRING,       0, COMP_TYPE_CHECK}, \
   {CONFIG_STRING_UL_COMP_TYPE,               HLP_UL_COMP_TYPE,      0,                      .strptr=NULL,     .defstrval="none",           TYPE_STRING,       0, COMP_TYPE_CHECK}, \
   {CONFIG_STRING_UL_IQ_WIDTH,                HLP_UL_IQ_WIDTH,       0,                      .iptr=NULL,       .defintval=9,                 TYPE_INT,          0}, \
+  {CONFIG_STRING_DL_COMP_TYPE,               HLP_DL_COMP_TYPE,      0,                      .strptr=NULL,     .defstrval="none",           TYPE_STRING,       0, COMP_TYPE_CHECK}, \
+  {CONFIG_STRING_DL_IQ_WIDTH,                HLP_DL_IQ_WIDTH,       0,                      .iptr=NULL,       .defintval=9,                 TYPE_INT,          0}, \
   {CONFIG_STRING_CLOCK_TIMEBASE,             HLP_CLOCK_TIMEBASE,    0,                      .strptr=NULL,     .defstrval="utc",            TYPE_STRING,       0, CLOCK_TIMEBASE_CHECK}, \
   {CONFIG_STRING_BFW_NUM_WEIGHTS,            HLP_BFW_NUM_WEIGHTS,   0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}, \
   {CONFIG_STRING_EAXC_DL,                    HLP_EAXC_DL,           0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}, \
@@ -528,6 +535,14 @@ int get_oru_options(ORU_t *oru)
               "%s %d out of range [1..16]\n",
               CONFIG_STRING_UL_IQ_WIDTH,
               fh_cfg->ul_iq_width);
+  int dl_comp_type_idx = config_paramidx_fromname(fh_param, nump, CONFIG_STRING_DL_COMP_TYPE);
+  AssertFatal(dl_comp_type_idx >= 0, "Index for %s config option not found!\n", CONFIG_STRING_DL_COMP_TYPE);
+  fh_cfg->dl_comp_type = (fh_comp_method_t)config_get_processedint(config_get_if(), &fh_param[dl_comp_type_idx]);
+  fh_cfg->dl_iq_width = *gpd(fh_param, nump, CONFIG_STRING_DL_IQ_WIDTH)->iptr;
+  AssertFatal(fh_cfg->dl_iq_width >= 1 && fh_cfg->dl_iq_width <= 16,
+              "%s %d out of range [1..16]\n",
+              CONFIG_STRING_DL_IQ_WIDTH,
+              fh_cfg->dl_iq_width);
   int clock_tb_idx = config_paramidx_fromname(fh_param, nump, CONFIG_STRING_CLOCK_TIMEBASE);
   AssertFatal(clock_tb_idx >= 0, "Index for %s config option not found!\n", CONFIG_STRING_CLOCK_TIMEBASE);
   fh_cfg->clock_timebase = (fh_clock_timebase_t)config_get_processedint(config_get_if(), &fh_param[clock_tb_idx]);

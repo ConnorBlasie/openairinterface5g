@@ -202,6 +202,9 @@ void set_eaxc_lists(void *context, const oru_eaxc_lists_t *lists);
 // Static UL compression (M-Plane): UL and PRACH U-Plane use method and iq_width with no udCompHdr, whatever the C-Plane
 // udCompHdr says. FH_COMP_NONE (the default) takes the compression from the C-Plane udCompHdr.
 void set_ul_static_compression(void *context, fh_comp_method_t method, int iq_width);
+// Static DL compression (M-Plane): DL U-Plane sections carry no udCompHdr and use method and iq_width. FH_COMP_NONE (the
+// default) keeps the per-section udCompHdr of comp_type.
+void set_dl_static_compression(void *context, fh_comp_method_t method, int iq_width);
 void handle_absolute_symbol_tick(void *context, uint64_t absolute_symbol);
 void handle_uplane_packet(void *context, void *pkt);
 void handle_cplane_packet(void *context, void *pkt);

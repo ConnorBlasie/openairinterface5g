@@ -242,6 +242,7 @@ void *oru_fh_init(oru_fh_config_t *cfg)
                                                cfg->prach_kbar);
   set_bf_weight_counts(fh->packet_processor, cfg->bfw_counts, cfg->num_bfw_counts);
   set_ul_static_compression(fh->packet_processor, cfg->ul_comp_type, cfg->ul_iq_width);
+  set_dl_static_compression(fh->packet_processor, cfg->dl_comp_type, cfg->dl_iq_width);
   const oru_eaxc_lists_t *lists = &cfg->eaxc_lists;
   if (lists->num[ORU_EAXC_DL] + lists->num[ORU_EAXC_UL] + lists->num[ORU_EAXC_PRACH] + lists->num[ORU_EAXC_SRS] > 0) {
     set_eaxc_lists(fh->packet_processor, lists);

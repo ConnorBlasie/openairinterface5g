@@ -184,6 +184,8 @@ typedef struct {
   _Atomic(uint8_t) ul_seq_id[NUM_EAXC_IDS];
   size_t mtu;
   fh_comp_method_t dl_comp_method;
+  fh_comp_method_t dl_static_comp_method; // FH_COMP_NONE: DL compression from the U-Plane udCompHdr
+  uint8_t dl_static_iq_width;
   fh_comp_method_t ul_static_comp_method; // FH_COMP_NONE: UL compression from the C-Plane udCompHdr
   uint8_t ul_static_iq_width;
   int bfw_counts[ORU_MAX_BFW_COUNTS]; // weight counts per ext1/ext11 vector, tried in order
@@ -462,6 +464,15 @@ void set_ul_static_compression(void *context, fh_comp_method_t method, int iq_wi
   ctx->ul_static_iq_width = iq_width;
 }
 
+void set_dl_static_compression(void *context, fh_comp_method_t method, int iq_width)
+{
+  oru_packet_processor_context_t *ctx = (oru_packet_processor_context_t *)context;
+  AssertFatal(method < FH_COMP_NUM_METHODS, "DL compression method %d out of range\n", method);
+  AssertFatal(method == FH_COMP_NONE || (iq_width >= 1 && iq_width <= 16), "DL iq_width %d out of range [1..16]\n", iq_width);
+  ctx->dl_static_comp_method = method;
+  ctx->dl_static_iq_width = iq_width;
+}
+
 // The UL compression of a C-Plane message with udCompHdr ud: the static one if set, else the one ud gives
 static void ul_compression(const oru_packet_processor_context_t *ctx,
                            const struct xran_radioapp_udComp_header *ud,
@@ -637,10 +648,12 @@ void handle_uplane_packet(void *context, void *pkt)
   uint16_t sym_inc;
   uint16_t rb;
   uint16_t sect_id;
-  const bool has_comp_hdr = ctx->dl_comp_method != FH_COMP_NONE;
+  // Static compression is an M-Plane setting: the U-Plane sections carry no udCompHdr
+  const bool static_comp = ctx->dl_static_comp_method != FH_COMP_NONE;
+  const bool has_comp_hdr = !static_comp && ctx->dl_comp_method != FH_COMP_NONE;
   uint8_t staticComp = 0;
-  uint8_t compMeth = 0;
-  uint8_t iqWidth = 0;
+  uint8_t compMeth = static_comp ? ctx->dl_static_comp_method : 0;
+  uint8_t iqWidth = static_comp ? ctx->dl_static_iq_width : 0;
   int ret = xran_extract_iq_samples(pkt,
                                     &ctx->eaxcid_config,
                                     &iq_data_start,
@@ -695,8 +708,8 @@ void handle_uplane_packet(void *context, void *pkt)
   // ret is the packet length still remaining after xran_extract_iq_samples() stripped the headers -
   // verify it actually holds the IQ payload the header claims, before iq_data_start is handed off
   // to the deferred unpack_iq() in read_dl_iq_streams().
-  size_t expected_bytes = has_comp_hdr ? (size_t)effective_num_prbu * FH_COMP_PRB_BYTES(effective_iq_width)
-                                       : (size_t)effective_num_prbu * NR_NB_SC_PER_RB * 2 * sizeof(uint16_t);
+  size_t expected_bytes = compMeth != FH_COMP_NONE ? (size_t)effective_num_prbu * FH_COMP_PRB_BYTES(effective_iq_width)
+                                                   : (size_t)effective_num_prbu * NR_NB_SC_PER_RB * 2 * sizeof(uint16_t);
   if ((size_t)ret < expected_bytes) {
     LOG_W(HW,
           "U-plane packet: payload too short (%d bytes, need %zu for %u PRBs), dropping\n",
