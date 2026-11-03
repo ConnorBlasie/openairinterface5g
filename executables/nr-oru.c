@@ -53,9 +53,9 @@
 #define HLP_ORU_NUM_UL_SYMBOLS "set the number of UL symbols in the mixed slot"
 #define HLP_NB_FH_STREAMS "number of fronthaul streams from DU (0=passthrough, enables codebook beamforming when > 0)"
 #define HLP_CODEBOOK_NB_BEAMS "number of beams in the O-RU codebook"
-#define HLP_CODEBOOK_WEIGHTS \
+#define HLP_CODEBOOK_WEIGHTS                                                                         \
   "Q15 codebook weights: nb_beams * nb_tx * nb_fh_streams interleaved Re/Im pairs; per beam, the tx" \
-  " antenna row, conjugated, is also the UL Rx combine weight for that RX antenna"
+  " antenna row is also the UL Rx combine weight for that RX antenna"
 #define HLP_ORU_THREEQUARTER_FS "set the 3/4 sampling frequency"
 
 // clang-format off
