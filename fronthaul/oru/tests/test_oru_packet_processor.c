@@ -2360,9 +2360,10 @@ void test_hyper_frame_calculation()
   printf("Hyper-frame calculation test passed!\n");
 }
 
-void test_dl_bfp_decompression(void)
+// static_comp: BFP9 as a static M-Plane setting (cuBB dl_iq_data_fmt), with no udCompHdr in the U-Plane
+void test_dl_bfp_decompression(bool static_comp)
 {
-  printf("Testing DL BFP decompression...\n");
+  printf("Testing DL BFP decompression%s...\n", static_comp ? " (static)" : "");
   int mu = 1;
   int slots_per_subframe = 1 << mu;
   const int n_prb = 1;
@@ -2376,12 +2377,27 @@ void test_dl_bfp_decompression(void)
   int8_t pre_compressed[FH_COMP_PRB_BYTES(iq_bits)];
   fh_compress_prbs(FH_COMP_BFP, iq_bits, n_prb, src_iq, pre_compressed);
 
-  void *ctx = init_packet_processor(mu, 273, 200, 400, 100, 300,
-                                    2, 2, 0, 0, 5,
-                                    test_alloc_mbuf, test_send_mbuf,
-                                    NULL, 1500, 0,
-                                    FH_COMP_BFP, 0);
+  void *ctx = init_packet_processor(mu,
+                                    273,
+                                    200,
+                                    400,
+                                    100,
+                                    300,
+                                    2,
+                                    2,
+                                    0,
+                                    0,
+                                    5,
+                                    test_alloc_mbuf,
+                                    test_send_mbuf,
+                                    NULL,
+                                    1500,
+                                    0,
+                                    static_comp ? FH_COMP_NONE : FH_COMP_BFP,
+                                    0);
   assert(ctx != NULL);
+  if (static_comp)
+    set_dl_static_compression(ctx, FH_COMP_BFP, iq_bits);
 
   uint64_t current_sym = 1000;
   handle_absolute_symbol_tick(ctx, current_sym);
@@ -2433,11 +2449,13 @@ void test_dl_bfp_decompression(void)
   u_data->fields.start_prbu = 0;
   u_data->fields.sect_id = 0;
   u_data->fields.all_bits = rte_cpu_to_be_32(u_data->fields.all_bits);
-  struct data_section_compression_hdr *comp_hdr =
-      (struct data_section_compression_hdr *)rte_pktmbuf_append(u_mbuf, sizeof(struct data_section_compression_hdr));
-  memset(comp_hdr, 0, sizeof(*comp_hdr));
-  comp_hdr->ud_comp_hdr.ud_comp_meth = FH_COMP_BFP;
-  comp_hdr->ud_comp_hdr.ud_iq_width = XRAN_CONVERT_IQWIDTH(iq_bits);
+  if (!static_comp) {
+    struct data_section_compression_hdr *comp_hdr =
+        (struct data_section_compression_hdr *)rte_pktmbuf_append(u_mbuf, sizeof(struct data_section_compression_hdr));
+    memset(comp_hdr, 0, sizeof(*comp_hdr));
+    comp_hdr->ud_comp_hdr.ud_comp_meth = FH_COMP_BFP;
+    comp_hdr->ud_comp_hdr.ud_iq_width = XRAN_CONVERT_IQWIDTH(iq_bits);
+  }
   int8_t *payload = (int8_t *)rte_pktmbuf_append(u_mbuf, FH_COMP_PRB_BYTES(iq_bits) * n_prb);
   assert(payload != NULL);
   memcpy(payload, pre_compressed, FH_COMP_PRB_BYTES(iq_bits) * n_prb);
@@ -2448,6 +2466,7 @@ void test_dl_bfp_decompression(void)
   get_packet_processor_stats(ctx, &stats);
   assert(stats.uplane_err_early == 0);
   assert(stats.uplane_err_late == 0);
+  assert(stats.uplane_err_short_payload == 0);
 
   current_sym += 10;
   handle_absolute_symbol_tick(ctx, current_sym);
@@ -2472,7 +2491,7 @@ void test_dl_bfp_decompression(void)
     assert(recovered[i] == src_iq[i]);
 
   cleanup_packet_processor(ctx);
-  printf("DL BFP decompression passed!\n");
+  printf("DL BFP decompression%s passed!\n", static_comp ? " (static)" : "");
 }
 
 void test_ul_bfp_compression(void)
@@ -4390,7 +4409,8 @@ int main(int argc, char **argv)
   usleep(10000);
   test_hyper_frame_calculation();
   usleep(10000);
-  test_dl_bfp_decompression();
+  test_dl_bfp_decompression(false);
+  test_dl_bfp_decompression(true);
   usleep(10000);
   test_ul_bfp_compression();
   usleep(10000);
