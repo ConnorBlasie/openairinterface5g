@@ -134,15 +134,14 @@ void combine_dl_streams(c16_t **txDataF,
   }
 }
 
-// out[k] = sum_a conj(w[a]) * fft_data[a][k] over bins [k0, k0 + nk), a < nb_ant
+// out[k] = sum_a w[a] * fft_data[a][k] over bins [k0, k0 + nk), a < nb_ant
 static void combine_ul_weights(const c16_t *const fft_data[], int nb_ant, int k0, int nk, const c16_t *w, c16_t *out)
 {
   memset(&out[k0], 0, nk * sizeof(c16_t));
   for (int a = 0; a < nb_ant; a++) {
-    // Same per-bin saturating multiply-accumulate as the DL codebook path, with the conjugate
-    // (receive) weight: see the header for why UL uses w^H.
-    const c16_t w_rx = {.r = w[a].r, .i = w[a].i == INT16_MIN ? INT16_MAX : (int16_t)-w[a].i};
-    rotate_add_cpx_vector(&fft_data[a][k0], w_rx, &out[k0], nk, 15);
+    // Same per-bin saturating multiply-accumulate as the DL codebook path, with the same weight:
+    // see the header for why UL uses w, not conj(w).
+    rotate_add_cpx_vector(&fft_data[a][k0], w[a], &out[k0], nk, 15);
   }
 }
 

@@ -52,9 +52,9 @@ void combine_dl_streams(c16_t **txDataF,
                         c16_t rotation);
 
 // UL Rx beamforming: combine per-antenna FFT output into one beam stream over bins [k0, k0 + nk),
-// out[k] = sum_a conj(w[beam][a][stream]) * fft_data[a][k]. The codebook holds transmit weights: a
-// UE in the direction of DL beam w is received through a channel proportional to w, so the matched
-// receive combiner for the same beam is w^H. Bins outside the range are left untouched.
+// out[k] = sum_a w[beam][a][stream] * fft_data[a][k]. The codebook holds transmit weights: DL beam w
+// reaches a UE with channel h when w is proportional to conj(h), and the UL channel is the same h, so
+// the matched receive combiner for the same beam is w itself. Bins outside the range are left untouched.
 void combine_ul_beam_fd(const c16_t *const rxdataF[],
                         int nb_rx,
                         int k0,
@@ -82,7 +82,7 @@ int oru_prb_fft_runs(int fft_size, int nbins, int start_prb, int num_prb, oru_ff
 // with out and fft_data in unshifted FFT layout (fft_size bins). Contiguous RE c sits at bin
 // c < nbins / 2 ? fft_size - nbins / 2 + c : c - nbins / 2 (the inverse of fftshift()), so the range
 // covers at most two bin segments. The range is clamped to the band; other bins are left untouched.
-// A bundle of set with dynamic weights (bfw) is combined with conj(weights[a]) instead of the codebook.
+// A bundle of set with dynamic weights (bfw) is combined with weights[a] instead of the codebook.
 void combine_ul_beam_prbs(const c16_t *const fft_data[],
                           int nb_rx,
                           int fft_size,
@@ -98,7 +98,7 @@ void combine_ul_beam_prbs(const c16_t *const fft_data[],
 
 // UL Rx beamforming of a PRACH section from start_prb: combine_ul_beam_fd() over sequence bins [0, nk), bin k being RE
 // re_offset + k of the section (where write_prach_iq() puts it), in PRB start_prb + (re_offset + k) / 12. A bundle of
-// set with dynamic weights (bfw) is combined with conj(weights[a]) instead of the codebook, as in combine_ul_beam_prbs().
+// set with dynamic weights (bfw) is combined with weights[a] instead of the codebook, as in combine_ul_beam_prbs().
 void combine_ul_prach_beam(const c16_t *const rxdataF[],
                            int nb_rx,
                            int nk,
