@@ -32,7 +32,7 @@ add_test(NAME test_xran_pkt_bfw COMMAND test_xran_pkt_bfw)
 set_property(TEST test_xran_pkt_bfw PROPERTY LABELS fronthaul)
 
 add_executable(test_xran_pkt_ulpi test_xran_pkt_ulpi.c)
-target_link_libraries(test_xran_pkt_ulpi PRIVATE PkgConfig::dpdk)
+target_link_libraries(test_xran_pkt_ulpi PRIVATE xran_pkt PkgConfig::dpdk)
 target_compile_options(test_xran_pkt_ulpi PRIVATE ${dpdk_CFLAGS})
 target_include_directories(test_xran_pkt_ulpi PRIVATE ../)
 add_dependencies(tests test_xran_pkt_ulpi)
