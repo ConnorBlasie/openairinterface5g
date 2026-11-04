@@ -325,7 +325,7 @@ static size_t roundtrip_se10(const xran_se10_hdr_t *hdr, const xran_se10_port_t 
   xran_se10_port_t ports_out[XRAN_SE10_MAX_PORTS];
   memset(&hdr_out, 0xA5, sizeof(hdr_out));
   memset(ports_out, 0xA5, sizeof(ports_out));
-  assert(xran_decode_se10(buf, len, &hdr_out, ports_out) == XRAN_ULPI_OK);
+  assert(xran_decode_se10(buf, len, XRAN_SE10_MAX_PORTS, &hdr_out, ports_out) == XRAN_ULPI_OK);
   assert_se10_eq(hdr, ports, &hdr_out, ports_out);
   if (ports == NULL)
     assert(ports_out[0].id == 0xA5A5 && ports_out[0].portListIndex == 0xA5);
@@ -589,7 +589,7 @@ static void test_se10_vectors(void)
   for (size_t v = 0; v < sizeof(vectors) / sizeof(vectors[0]); v++) {
     xran_se10_hdr_t hdr;
     xran_se10_port_t ports[XRAN_SE10_MAX_PORTS];
-    assert(xran_decode_se10(vectors[v].bytes, vectors[v].len, &hdr, ports) == XRAN_ULPI_OK);
+    assert(xran_decode_se10(vectors[v].bytes, vectors[v].len, XRAN_SE10_MAX_PORTS, &hdr, ports) == XRAN_ULPI_OK);
     assert_se10_eq(&hdr, ports, vectors[v].hdr, vectors[v].ports);
     uint8_t buf[16];
     size_t len = 0;
@@ -762,7 +762,7 @@ static void test_st5_se10_se24_section(void)
       assert(ext_type == XRAN_CP_SECTIONEXTCMD_10);
       xran_se10_hdr_t out;
       xran_se10_port_t ports[XRAN_SE10_MAX_PORTS];
-      assert(xran_decode_se10(pkt + off, ext_len, &out, ports) == XRAN_ULPI_OK);
+      assert(xran_decode_se10(pkt + off, ext_len, XRAN_SE10_MAX_PORTS, &out, ports) == XRAN_ULPI_OK);
       assert_se10_eq(&se10, se10_ports, &out, ports);
       for (int k = 0; k < xran_se10_num_ports(&out); k++)
         n_layers += ports[k].id != 0x7FFF;

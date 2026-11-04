@@ -23,6 +23,7 @@ typedef enum {
   XRAN_ULPI_ERR_EXT_TYPE = -4, // extType is not the one of the decoder
   XRAN_ULPI_ERR_ENTRY_TYPE = -5, // SE 24 entryType 4 to 7 (reserved)
   XRAN_ULPI_ERR_RANGE = -6, // encode: a field value doesn't fit its bit width
+  XRAN_ULPI_ERR_TOO_MANY = -7, // decode: more elements than the caller has room for
 } xran_ulpi_err_t;
 
 // Description of an xran_ulpi_err_t value
@@ -75,13 +76,14 @@ xran_ulpi_err_t xran_encode_se10(const xran_se10_hdr_t *hdr,
                                  size_t avail,
                                  size_t *len_out);
 
-// Decodes SE 10 from ext, with len bytes from xran_section_ext_len(). The listed ports go to ports_out, which has room
-// for XRAN_SE10_MAX_PORTS. Returns XRAN_ULPI_OK, or an error if the extension is malformed. hdr_out and ports_out are
-// not changed on error.
+// Decodes SE 10 from ext, with len bytes from xran_section_ext_len(). The xran_se10_num_ports() listed ports go to
+// ports_out, which has room for max_ports. Returns XRAN_ULPI_OK, XRAN_ULPI_ERR_TOO_MANY if there are more than
+// max_ports ports, or an error if the extension is malformed. hdr_out and ports_out are not changed on error.
 xran_ulpi_err_t xran_decode_se10(const uint8_t *ext,
                                  size_t len,
+                                 int max_ports,
                                  xran_se10_hdr_t *hdr_out,
-                                 xran_se10_port_t ports_out[XRAN_SE10_MAX_PORTS]);
+                                 xran_se10_port_t *ports_out);
 
 /**********************************************************************
  * SE 24: PUSCH DMRS configuration (CUS v16.01 7.7.24)

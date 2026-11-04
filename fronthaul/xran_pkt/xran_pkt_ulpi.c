@@ -28,6 +28,8 @@ const char *xran_ulpi_strerror(xran_ulpi_err_t err)
       return "reserved SE 24 entryType";
     case XRAN_ULPI_ERR_RANGE:
       return "field value doesn't fit its bit width";
+    case XRAN_ULPI_ERR_TOO_MANY:
+      return "more elements than the caller has room for";
     default:
       return "unknown error";
   }
@@ -99,15 +101,17 @@ xran_ulpi_err_t xran_encode_se10(const xran_se10_hdr_t *hdr,
 
 xran_ulpi_err_t xran_decode_se10(const uint8_t *ext,
                                  size_t len,
+                                 int max_ports,
                                  xran_se10_hdr_t *hdr_out,
-                                 xran_se10_port_t ports_out[XRAN_SE10_MAX_PORTS])
+                                 xran_se10_port_t *ports_out)
 {
-  AssertError(ext != NULL && hdr_out != NULL && ports_out != NULL,
+  AssertError(ext != NULL && hdr_out != NULL && ports_out != NULL && max_ports > 0,
               return XRAN_ULPI_ERR_ARG,
-              "ext %p hdr_out %p ports_out %p\n",
+              "ext %p hdr_out %p ports_out %p max_ports %d\n",
               ext,
               hdr_out,
-              ports_out);
+              ports_out,
+              max_ports);
   if (len < 3)
     return XRAN_ULPI_ERR_TRUNCATED;
   if ((ext[0] & 0x7F) != XRAN_CP_SECTIONEXTCMD_10)
@@ -121,10 +125,12 @@ xran_ulpi_err_t xran_decode_se10(const uint8_t *ext,
     return XRAN_ULPI_ERR_TRUNCATED;
 
   xran_se10_hdr_t hdr = {.ef = ext[0] >> 7, .beamGroupType = beam_group_type, .numPortc = num_portc};
+  int n_ports = xran_se10_num_ports(&hdr);
+  if (n_ports > max_ports)
+    return XRAN_ULPI_ERR_TOO_MANY;
   const uint8_t *p = ext + 3;
   if (beam_group_type == XRAN_SE10_BGT_11B)
     hdr.firstPortListIndex = *p++;
-  int n_ports = xran_se10_num_ports(&hdr);
   for (int k = 0; k < n_ports; k++) {
     xran_se10_port_t port = {.id = (uint16_t)((p[0] & 0x7F) << 8 | p[1])};
     p += 2;
