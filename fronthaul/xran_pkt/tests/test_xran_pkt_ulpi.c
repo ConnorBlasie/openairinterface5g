@@ -308,7 +308,8 @@ static void assert_se10_eq(const xran_se10_hdr_t *ha,
 }
 
 // Encodes, checks the length against the extension walk and that nothing is written after the extension, decodes
-// and compares. 00b and 01b pass ports = NULL, and the decoder must not touch ports_out. Returns the length.
+// and compares. 00b and 01b pass ports = NULL, and the decoder must not touch ports_out. The decode has room for
+// exactly the listed ports; with one place less it must return XRAN_ULPI_ERR_TOO_MANY. Returns the length.
 static size_t roundtrip_se10(const xran_se10_hdr_t *hdr, const xran_se10_port_t *ports)
 {
   uint8_t buf[256];
@@ -321,14 +322,18 @@ static size_t roundtrip_se10(const xran_se10_hdr_t *hdr, const xran_se10_port_t 
   assert(xran_section_ext_len(XRAN_CP_SECTIONEXTCMD_10, buf, sizeof(buf), &walk_len) == XRAN_BFW_OK);
   assert(walk_len == len);
 
+  int n_ports = xran_se10_num_ports(hdr);
   xran_se10_hdr_t hdr_out;
-  xran_se10_port_t ports_out[XRAN_SE10_MAX_PORTS];
+  xran_se10_port_t ports_out[XRAN_SE10_MAX_PORTS + 1];
   memset(&hdr_out, 0xA5, sizeof(hdr_out));
   memset(ports_out, 0xA5, sizeof(ports_out));
-  assert(xran_decode_se10(buf, len, XRAN_SE10_MAX_PORTS, &hdr_out, ports_out) == XRAN_ULPI_OK);
+  if (n_ports > 1) {
+    assert(xran_decode_se10(buf, len, n_ports - 1, &hdr_out, ports_out) == XRAN_ULPI_ERR_TOO_MANY);
+    assert(hdr_out.numPortc == (int)0xA5A5A5A5 && ports_out[0].id == 0xA5A5);
+  }
+  assert(xran_decode_se10(buf, len, n_ports > 0 ? n_ports : 1, &hdr_out, ports_out) == XRAN_ULPI_OK);
   assert_se10_eq(hdr, ports, &hdr_out, ports_out);
-  if (ports == NULL)
-    assert(ports_out[0].id == 0xA5A5 && ports_out[0].portListIndex == 0xA5);
+  assert(ports_out[n_ports].id == 0xA5A5 && ports_out[n_ports].portListIndex == 0xA5);
   return len;
 }
 
