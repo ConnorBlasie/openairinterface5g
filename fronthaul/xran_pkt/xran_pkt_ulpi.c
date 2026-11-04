@@ -30,6 +30,8 @@ const char *xran_ulpi_strerror(xran_ulpi_err_t err)
       return "field value doesn't fit its bit width";
     case XRAN_ULPI_ERR_TOO_MANY:
       return "more elements than the caller has room for";
+    case XRAN_ULPI_ERR_BEAM_TYPE:
+      return "reserved SE 27 beamType";
     default:
       return "unknown error";
   }
@@ -287,5 +289,228 @@ xran_ulpi_err_t xran_decode_se24(const uint8_t *ext,
     entries_out[i] = e;
     p += se24_entry_len(e.entryType);
   }
+  return XRAN_ULPI_OK;
+}
+
+/**********************************************************************
+ * SE 25
+ **********************************************************************/
+
+#define SE25_HDR_LEN 2 // Table 7.7.25.1-1
+#define SE25_LAYER_LEN (XRAN_SE25_NUM_SYMBOLS / 2) // two 4-bit txWinForOnAirSymbol for each byte
+
+xran_ulpi_err_t xran_encode_se25(const xran_se25_hdr_t *hdr,
+                                 const xran_se25_layer_t *layers,
+                                 uint8_t *buf,
+                                 size_t avail,
+                                 size_t *len_out)
+{
+  AssertError(hdr != NULL && layers != NULL && buf != NULL && len_out != NULL,
+              return XRAN_ULPI_ERR_ARG,
+              "hdr %p layers %p buf %p len_out %p\n",
+              hdr,
+              layers,
+              buf,
+              len_out);
+  if (hdr->ef > 1 || hdr->numLayers < 1 || hdr->numLayers > XRAN_SE25_MAX_LAYERS)
+    return XRAN_ULPI_ERR_RANGE;
+  for (int l = 0; l < hdr->numLayers; l++)
+    for (int sym = 0; sym < XRAN_SE25_NUM_SYMBOLS; sym++)
+      if (layers[l].txWinForOnAirSymbol[sym] > 0xF)
+        return XRAN_ULPI_ERR_RANGE;
+  size_t len = pad4(SE25_HDR_LEN + (size_t)SE25_LAYER_LEN * hdr->numLayers);
+  if (len > avail)
+    return XRAN_ULPI_ERR_TRUNCATED;
+
+  memset(buf, 0, len);
+  buf[0] = (uint8_t)(hdr->ef << 7 | XRAN_CP_SECTIONEXTCMD_25);
+  buf[1] = (uint8_t)(len / 4);
+  uint8_t *p = buf + SE25_HDR_LEN;
+  for (int l = 0; l < hdr->numLayers; l++)
+    for (int sym = 0; sym < XRAN_SE25_NUM_SYMBOLS; sym += 2)
+      *p++ = (uint8_t)(layers[l].txWinForOnAirSymbol[sym] << 4 | layers[l].txWinForOnAirSymbol[sym + 1]);
+  *len_out = len;
+  return XRAN_ULPI_OK;
+}
+
+xran_ulpi_err_t xran_decode_se25(const uint8_t *ext,
+                                 size_t len,
+                                 int max_layers,
+                                 xran_se25_hdr_t *hdr_out,
+                                 xran_se25_layer_t *layers_out)
+{
+  AssertError(ext != NULL && hdr_out != NULL && layers_out != NULL && max_layers > 0,
+              return XRAN_ULPI_ERR_ARG,
+              "ext %p hdr_out %p layers_out %p max_layers %d\n",
+              ext,
+              hdr_out,
+              layers_out,
+              max_layers);
+  if (len < SE25_HDR_LEN)
+    return XRAN_ULPI_ERR_TRUNCATED;
+  if ((ext[0] & 0x7F) != XRAN_CP_SECTIONEXTCMD_25)
+    return XRAN_ULPI_ERR_EXT_TYPE;
+  size_t ext_len = (size_t)ext[1] * 4;
+  int num_layers = ext_len < SE25_HDR_LEN ? 0 : (int)((ext_len - SE25_HDR_LEN) / SE25_LAYER_LEN);
+  if (num_layers < 1 || pad4(SE25_HDR_LEN + (size_t)SE25_LAYER_LEN * num_layers) != ext_len)
+    return XRAN_ULPI_ERR_EXT_LEN;
+  if (ext_len > len)
+    return XRAN_ULPI_ERR_TRUNCATED;
+  if (num_layers > max_layers)
+    return XRAN_ULPI_ERR_TOO_MANY;
+
+  const uint8_t *p = ext + SE25_HDR_LEN;
+  for (int l = 0; l < num_layers; l++) {
+    for (int sym = 0; sym < XRAN_SE25_NUM_SYMBOLS; sym += 2) {
+      layers_out[l].txWinForOnAirSymbol[sym] = *p >> 4;
+      layers_out[l].txWinForOnAirSymbol[sym + 1] = *p & 0xF;
+      p++;
+    }
+  }
+  *hdr_out = (xran_se25_hdr_t){.ef = ext[0] >> 7, .numLayers = num_layers};
+  return XRAN_ULPI_OK;
+}
+
+/**********************************************************************
+ * SE 26
+ **********************************************************************/
+
+#define SE26_HDR_LEN 4 // Table 7.7.26.1-1
+
+xran_ulpi_err_t xran_encode_se26(const xran_se26_hdr_t *hdr,
+                                 const int16_t *freqOffsetFb,
+                                 uint8_t *buf,
+                                 size_t avail,
+                                 size_t *len_out)
+{
+  AssertError(hdr != NULL && buf != NULL && len_out != NULL,
+              return XRAN_ULPI_ERR_ARG,
+              "hdr %p buf %p len_out %p\n",
+              hdr,
+              buf,
+              len_out);
+  if (hdr->ef > 1 || hdr->numFoFb > XRAN_SE26_MAX_FOFB)
+    return XRAN_ULPI_ERR_RANGE;
+  AssertError(hdr->numFoFb == 0 || freqOffsetFb != NULL,
+              return XRAN_ULPI_ERR_ARG,
+              "freqOffsetFb NULL for %d values\n",
+              hdr->numFoFb);
+  size_t len = pad4(SE26_HDR_LEN + (size_t)2 * hdr->numFoFb);
+  if (len > avail)
+    return XRAN_ULPI_ERR_TRUNCATED;
+
+  memset(buf, 0, len);
+  buf[0] = (uint8_t)(hdr->ef << 7 | XRAN_CP_SECTIONEXTCMD_26);
+  buf[1] = (uint8_t)(len / 4);
+  buf[3] = hdr->numFoFb; // buf[2] and the msb of buf[3] are reserved
+  uint8_t *p = buf + SE26_HDR_LEN;
+  for (int i = 0; i < hdr->numFoFb; i++) {
+    uint16_t v = (uint16_t)freqOffsetFb[i];
+    *p++ = (uint8_t)(v >> 8);
+    *p++ = (uint8_t)(v & 0xFF);
+  }
+  *len_out = len;
+  return XRAN_ULPI_OK;
+}
+
+xran_ulpi_err_t xran_decode_se26(const uint8_t *ext, size_t len, int max_fofb, xran_se26_hdr_t *hdr_out, int16_t *freqOffsetFb_out)
+{
+  AssertError(ext != NULL && hdr_out != NULL && freqOffsetFb_out != NULL && max_fofb > 0,
+              return XRAN_ULPI_ERR_ARG,
+              "ext %p hdr_out %p freqOffsetFb_out %p max_fofb %d\n",
+              ext,
+              hdr_out,
+              freqOffsetFb_out,
+              max_fofb);
+  if (len < SE26_HDR_LEN)
+    return XRAN_ULPI_ERR_TRUNCATED;
+  if ((ext[0] & 0x7F) != XRAN_CP_SECTIONEXTCMD_26)
+    return XRAN_ULPI_ERR_EXT_TYPE;
+  int num_fofb = ext[3] & 0x7F;
+  size_t ext_len = (size_t)ext[1] * 4;
+  if (ext_len != pad4(SE26_HDR_LEN + (size_t)2 * num_fofb))
+    return XRAN_ULPI_ERR_EXT_LEN;
+  if (ext_len > len)
+    return XRAN_ULPI_ERR_TRUNCATED;
+  if (num_fofb > max_fofb)
+    return XRAN_ULPI_ERR_TOO_MANY;
+
+  const uint8_t *p = ext + SE26_HDR_LEN;
+  for (int i = 0; i < num_fofb; i++, p += 2)
+    freqOffsetFb_out[i] = (int16_t)(uint16_t)(p[0] << 8 | p[1]);
+  *hdr_out = (xran_se26_hdr_t){.ef = ext[0] >> 7, .numFoFb = num_fofb};
+  return XRAN_ULPI_OK;
+}
+
+/**********************************************************************
+ * SE 27
+ **********************************************************************/
+
+#define SE27_HDR_LEN 4 // Tables 7.7.27.1-1 and 7.7.27.1-2
+
+xran_ulpi_err_t xran_encode_se27(const xran_se27_hdr_t *hdr, const uint16_t *beamId, uint8_t *buf, size_t avail, size_t *len_out)
+{
+  AssertError(hdr != NULL && beamId != NULL && buf != NULL && len_out != NULL,
+              return XRAN_ULPI_ERR_ARG,
+              "hdr %p beamId %p buf %p len_out %p\n",
+              hdr,
+              beamId,
+              buf,
+              len_out);
+  if (hdr->beamType > XRAN_SE27_BEAM_RANGE)
+    return XRAN_ULPI_ERR_BEAM_TYPE;
+  if (hdr->ef > 1 || hdr->numElements < 1 || hdr->numElements > XRAN_SE27_MAX_ELEMENTS)
+    return XRAN_ULPI_ERR_RANGE;
+  int n_ids = xran_se27_num_beam_ids(hdr);
+  for (int i = 0; i < n_ids; i++)
+    if (beamId[i] > 0x7FFF)
+      return XRAN_ULPI_ERR_RANGE;
+  size_t len = pad4(SE27_HDR_LEN + (size_t)2 * n_ids);
+  if (len > avail)
+    return XRAN_ULPI_ERR_TRUNCATED;
+
+  memset(buf, 0, len);
+  buf[0] = (uint8_t)(hdr->ef << 7 | XRAN_CP_SECTIONEXTCMD_27);
+  buf[1] = (uint8_t)(len / 4);
+  buf[2] = (uint8_t)(hdr->beamType << 6);
+  buf[3] = (uint8_t)(hdr->numElements & 0xFF); // 256 elements is 0
+  uint8_t *p = buf + SE27_HDR_LEN;
+  for (int i = 0; i < n_ids; i++) {
+    *p++ = (uint8_t)(beamId[i] >> 8); // msb is reserved
+    *p++ = (uint8_t)(beamId[i] & 0xFF);
+  }
+  *len_out = len;
+  return XRAN_ULPI_OK;
+}
+
+xran_ulpi_err_t xran_decode_se27(const uint8_t *ext, size_t len, int max_beam_ids, xran_se27_hdr_t *hdr_out, uint16_t *beamId_out)
+{
+  AssertError(ext != NULL && hdr_out != NULL && beamId_out != NULL && max_beam_ids > 0,
+              return XRAN_ULPI_ERR_ARG,
+              "ext %p hdr_out %p beamId_out %p max_beam_ids %d\n",
+              ext,
+              hdr_out,
+              beamId_out,
+              max_beam_ids);
+  if (len < SE27_HDR_LEN)
+    return XRAN_ULPI_ERR_TRUNCATED;
+  if ((ext[0] & 0x7F) != XRAN_CP_SECTIONEXTCMD_27)
+    return XRAN_ULPI_ERR_EXT_TYPE;
+  xran_se27_hdr_t hdr = {.ef = ext[0] >> 7, .beamType = ext[2] >> 6, .numElements = ext[3] == 0 ? XRAN_SE27_MAX_ELEMENTS : ext[3]};
+  if (hdr.beamType > XRAN_SE27_BEAM_RANGE)
+    return XRAN_ULPI_ERR_BEAM_TYPE;
+  int n_ids = xran_se27_num_beam_ids(&hdr);
+  size_t ext_len = (size_t)ext[1] * 4;
+  if (ext_len != pad4(SE27_HDR_LEN + (size_t)2 * n_ids))
+    return XRAN_ULPI_ERR_EXT_LEN;
+  if (ext_len > len)
+    return XRAN_ULPI_ERR_TRUNCATED;
+  if (n_ids > max_beam_ids)
+    return XRAN_ULPI_ERR_TOO_MANY;
+
+  const uint8_t *p = ext + SE27_HDR_LEN;
+  for (int i = 0; i < n_ids; i++, p += 2)
+    beamId_out[i] = (uint16_t)((p[0] & 0x7F) << 8 | p[1]);
+  *hdr_out = hdr;
   return XRAN_ULPI_OK;
 }
