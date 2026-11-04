@@ -725,6 +725,302 @@ static void test_se24_vectors(void)
   printf("SE 24 byte vectors passed\n");
 }
 
+/**********************************************************************
+ * SE 25, SE 26 and SE 27 (CUS v16.01 7.7.25 to 7.7.27)
+ **********************************************************************/
+
+// Checks an encoded extension: length is a multiple of 4, matches extLen and the extension walk, nothing is written
+// after it, and the bytes from content_len to the end are zero
+static void check_encoded(uint8_t ext_type, const uint8_t *buf, size_t avail, size_t len, size_t content_len)
+{
+  assert(len % 4 == 0 && len < avail);
+  assert(buf[1] == len / 4);
+  assert(buf[len] == 0xEE);
+  size_t walk_len = 0;
+  assert(xran_section_ext_len(ext_type, buf, avail, &walk_len) == XRAN_BFW_OK);
+  assert(walk_len == len);
+  for (size_t i = content_len; i < len; i++)
+    assert(buf[i] == 0);
+}
+
+// numLayers 1 to 4, 12 and the maximum 145. Content lengths: 2 + 7 per layer (Table 7.7.25.1-1). For each layer count,
+// 16 passes put every 4-bit value at every symbol of every layer. The decode has room for exactly numLayers layers;
+// with one place less it must return XRAN_ULPI_ERR_TOO_MANY.
+static void test_se25_roundtrip(void)
+{
+  const struct {
+    int numLayers;
+    size_t content_len;
+    size_t ext_len;
+  } cases[] = {{1, 9, 12}, {2, 16, 16}, {3, 23, 24}, {4, 30, 32}, {12, 86, 88}, {XRAN_SE25_MAX_LAYERS, 1017, 1020}};
+  static xran_se25_layer_t in[XRAN_SE25_MAX_LAYERS], out[XRAN_SE25_MAX_LAYERS + 1];
+  static uint8_t buf[1100];
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+    for (int seed = 0; seed < 16; seed++) {
+      xran_se25_hdr_t hdr = {.ef = seed & 1, .numLayers = cases[c].numLayers};
+      for (int l = 0; l < hdr.numLayers; l++)
+        for (int sym = 0; sym < XRAN_SE25_NUM_SYMBOLS; sym++)
+          in[l].txWinForOnAirSymbol[sym] = (uint8_t)((sym + l + seed) & 0xF);
+      memset(buf, 0xEE, sizeof(buf));
+      size_t len = 0;
+      assert(xran_encode_se25(&hdr, in, buf, sizeof(buf), &len) == XRAN_ULPI_OK);
+      assert(len == cases[c].ext_len);
+      check_encoded(XRAN_CP_SECTIONEXTCMD_25, buf, sizeof(buf), len, cases[c].content_len);
+
+      xran_se25_hdr_t hdr_out;
+      memset(&hdr_out, 0xA5, sizeof(hdr_out));
+      memset(out, 0xA5, sizeof(out));
+      if (hdr.numLayers > 1) {
+        assert(xran_decode_se25(buf, len, hdr.numLayers - 1, &hdr_out, out) == XRAN_ULPI_ERR_TOO_MANY);
+        assert(hdr_out.numLayers == (int)0xA5A5A5A5 && out[0].txWinForOnAirSymbol[0] == 0xA5);
+      }
+      assert(xran_decode_se25(buf, len, hdr.numLayers, &hdr_out, out) == XRAN_ULPI_OK);
+      assert(hdr_out.ef == hdr.ef && hdr_out.numLayers == hdr.numLayers);
+      assert(memcmp(in, out, sizeof(in[0]) * hdr.numLayers) == 0);
+      assert(out[hdr.numLayers].txWinForOnAirSymbol[0] == 0xA5);
+    }
+  }
+  printf("SE 25 round trip passed\n");
+}
+
+// numFoFb 0 to 127 (bit width; 0 and 127 are reserved values). Each freqOffsetFb takes the range ends, 0x8000 (value not
+// provided), +-1, 0 and other values. Content lengths: 4 + 2 per value (Table 7.7.26.1-1). The decode has room for
+// exactly numFoFb values (1 for numFoFb 0); with one place less it must return XRAN_ULPI_ERR_TOO_MANY.
+static void test_se26_roundtrip(void)
+{
+  const struct {
+    int numFoFb;
+    size_t content_len;
+    size_t ext_len;
+  } lengths[] = {{0, 4, 4}, {1, 6, 8}, {2, 8, 8}, {3, 10, 12}, {126, 256, 256}, {127, 258, 260}};
+  for (int n = 0; n <= XRAN_SE26_MAX_FOFB; n++) {
+    xran_se26_hdr_t hdr = {.ef = n & 1, .numFoFb = n};
+    int16_t in[XRAN_SE26_MAX_FOFB], out[XRAN_SE26_MAX_FOFB + 1];
+    for (int i = 0; i < XRAN_SE26_MAX_FOFB; i++) {
+      const int16_t vals[] = {INT16_MIN, -30000, -1, 0, 1, 30000, INT16_MAX, (int16_t)(i * 1237)};
+      in[i] = vals[(i + n) % 8];
+    }
+    uint8_t buf[300];
+    memset(buf, 0xEE, sizeof(buf));
+    size_t len = 0;
+    assert(xran_encode_se26(&hdr, in, buf, sizeof(buf), &len) == XRAN_ULPI_OK);
+    size_t content_len = len;
+    for (size_t c = 0; c < sizeof(lengths) / sizeof(lengths[0]); c++) {
+      if (lengths[c].numFoFb == n) {
+        assert(len == lengths[c].ext_len);
+        content_len = lengths[c].content_len;
+      }
+    }
+    check_encoded(XRAN_CP_SECTIONEXTCMD_26, buf, sizeof(buf), len, content_len);
+
+    xran_se26_hdr_t hdr_out;
+    memset(&hdr_out, 0xA5, sizeof(hdr_out));
+    memset(out, 0xA5, sizeof(out));
+    if (n > 1) {
+      assert(xran_decode_se26(buf, len, n - 1, &hdr_out, out) == XRAN_ULPI_ERR_TOO_MANY);
+      assert(hdr_out.numFoFb == 0xA5 && out[0] == (int16_t)0xA5A5);
+    }
+    assert(xran_decode_se26(buf, len, n > 0 ? n : 1, &hdr_out, out) == XRAN_ULPI_OK);
+    assert(hdr_out.ef == hdr.ef && hdr_out.numFoFb == hdr.numFoFb);
+    assert(memcmp(in, out, sizeof(in[0]) * n) == 0);
+    assert(out[n] == (int16_t)0xA5A5);
+  }
+  printf("SE 26 round trip, numFoFb 0 to 127, passed\n");
+}
+
+// beamType 00b and 01b with numElements 1 to 256 and ef 0 and 1. The beamIds take 0, 1, 0x7FFE, 0x7FFF and other
+// values. Content lengths: 4 + 2 per beamId (Tables 7.7.27.1-1 and 7.7.27.1-2). The decode has room for exactly
+// xran_se27_num_beam_ids() beamIds; with one place less it must return XRAN_ULPI_ERR_TOO_MANY.
+static void test_se27_roundtrip(void)
+{
+  const struct {
+    uint8_t beamType;
+    int numElements;
+    size_t content_len;
+    size_t ext_len;
+  } lengths[] = {
+      {XRAN_SE27_BEAM_LIST, 1, 6, 8},
+      {XRAN_SE27_BEAM_LIST, 2, 8, 8},
+      {XRAN_SE27_BEAM_LIST, 3, 10, 12},
+      {XRAN_SE27_BEAM_LIST, 255, 514, 516},
+      {XRAN_SE27_BEAM_LIST, 256, 516, 516},
+      {XRAN_SE27_BEAM_RANGE, 1, 6, 8},
+      {XRAN_SE27_BEAM_RANGE, 256, 6, 8},
+  };
+  int n_cases = 0;
+  for (int bt = XRAN_SE27_BEAM_LIST; bt <= XRAN_SE27_BEAM_RANGE; bt++) {
+    for (int n = 1; n <= XRAN_SE27_MAX_ELEMENTS; n++) {
+      for (int ef = 0; ef <= 1; ef++) {
+        xran_se27_hdr_t hdr = {.ef = ef, .beamType = bt, .numElements = n};
+        uint16_t in[XRAN_SE27_MAX_ELEMENTS], out[XRAN_SE27_MAX_ELEMENTS + 1];
+        for (int i = 0; i < XRAN_SE27_MAX_ELEMENTS; i++) {
+          const uint16_t vals[] = {0, 1, 0x7FFE, 0x7FFF, (uint16_t)((i * 0x1357) & 0x7FFF)};
+          in[i] = vals[(i + n + ef) % 5];
+        }
+        uint8_t buf[600];
+        memset(buf, 0xEE, sizeof(buf));
+        size_t len = 0;
+        assert(xran_encode_se27(&hdr, in, buf, sizeof(buf), &len) == XRAN_ULPI_OK);
+        size_t content_len = len;
+        for (size_t c = 0; c < sizeof(lengths) / sizeof(lengths[0]); c++) {
+          if (lengths[c].beamType == bt && lengths[c].numElements == n) {
+            assert(len == lengths[c].ext_len);
+            content_len = lengths[c].content_len;
+          }
+        }
+        check_encoded(XRAN_CP_SECTIONEXTCMD_27, buf, sizeof(buf), len, content_len);
+
+        int n_ids = xran_se27_num_beam_ids(&hdr);
+        xran_se27_hdr_t hdr_out;
+        memset(&hdr_out, 0xA5, sizeof(hdr_out));
+        memset(out, 0xA5, sizeof(out));
+        if (n_ids > 1) {
+          assert(xran_decode_se27(buf, len, n_ids - 1, &hdr_out, out) == XRAN_ULPI_ERR_TOO_MANY);
+          assert(hdr_out.numElements == (int)0xA5A5A5A5 && out[0] == 0xA5A5);
+        }
+        assert(xran_decode_se27(buf, len, n_ids, &hdr_out, out) == XRAN_ULPI_OK);
+        assert(hdr_out.ef == hdr.ef && hdr_out.beamType == hdr.beamType && hdr_out.numElements == hdr.numElements);
+        assert(memcmp(in, out, sizeof(in[0]) * n_ids) == 0);
+        assert(out[n_ids] == 0xA5A5); // a range carries one beamId only
+        n_cases++;
+      }
+    }
+  }
+  assert(n_cases == 2 * 256 * 2);
+  printf("SE 27 round trip, all %d modes, passed\n", n_cases);
+}
+
+static void test_se25_se26_se27_vectors(void)
+{
+  // Table 7.7.25.2-1 (per-window symbol reordering). The table shows symbols 0 to 3 and 10 to 13; the full order is
+  // from Figure 7.7.25.2-2: on-air symbols 2, 3, 10, 11, 0, 1, 4, 5, 6, 7, 8, 9, 12, 13 in tx windows 0 to 13.
+  const uint8_t v25_window[] = {
+      0x19, // ef 0 | extType 0x19
+      0x03, // extLen 3 words
+      0x45, // symbol 0: window 4 | symbol 1: window 5
+      0x01, // 2: 0 | 3: 1
+      0x67, // 4: 6 | 5: 7
+      0x89, // 6: 8 | 7: 9
+      0xAB, // 8: 10 | 9: 11
+      0x23, // 10: 2 | 11: 3
+      0xCD, // 12: 12 | 13: 13
+      0x00,
+      0x00,
+      0x00, // padding
+  };
+  const xran_se25_layer_t l25_window[] = {{{4, 5, 0, 1, 6, 7, 8, 9, 10, 11, 2, 3, 12, 13}}};
+  // Table 7.7.25.3-2 (per-section tx-window reassignment, 2 layers). The full values are from Figure 7.7.25.3-4: layer 0
+  // sends two on-air symbols in each of windows 0 to 6, layer 1 the same in windows 7 to 13.
+  const uint8_t v25_layers[] = {
+      0x19, // ef 0 | extType 0x19
+      0x04, // extLen 4 words
+      0x11,
+      0x02,
+      0x23,
+      0x34,
+      0x45,
+      0x50,
+      0x66, // 1st layer
+      0x88,
+      0x79,
+      0x9A,
+      0xAB,
+      0xBC,
+      0xC7,
+      0xDD, // 2nd layer
+  };
+  const xran_se25_layer_t l25_layers[] = {{{1, 1, 0, 2, 2, 3, 3, 4, 4, 5, 5, 0, 6, 6}},
+                                          {{8, 8, 7, 9, 9, 10, 10, 11, 11, 12, 12, 7, 13, 13}}};
+  const struct {
+    const uint8_t *bytes;
+    size_t len;
+    int numLayers;
+    const xran_se25_layer_t *layers;
+  } v25[] = {{v25_window, sizeof(v25_window), 1, l25_window}, {v25_layers, sizeof(v25_layers), 2, l25_layers}};
+  for (size_t v = 0; v < 2; v++) {
+    xran_se25_hdr_t hdr;
+    xran_se25_layer_t layers[XRAN_SE25_MAX_LAYERS];
+    assert(xran_decode_se25(v25[v].bytes, v25[v].len, XRAN_SE25_MAX_LAYERS, &hdr, layers) == XRAN_ULPI_OK);
+    assert(hdr.ef == 0 && hdr.numLayers == v25[v].numLayers);
+    assert(memcmp(layers, v25[v].layers, sizeof(layers[0]) * hdr.numLayers) == 0);
+    uint8_t buf[32];
+    size_t len = 0;
+    assert(xran_encode_se25(&hdr, v25[v].layers, buf, sizeof(buf), &len) == XRAN_ULPI_OK);
+    assert(len == v25[v].len && memcmp(buf, v25[v].bytes, len) == 0);
+  }
+
+  // Table 7.7.26.1-1. v16.01 shows extLen = 0x01, but the length depends on numFoFb (v21.00 shows extLen variable).
+  const uint8_t v26[] = {
+      0x9A, // ef 1 | extType 0x1A
+      0x03, // extLen 3 words
+      0x00, // reserved
+      0x03, // reserved | numFoFb 3
+      0x75,
+      0x30, // +30000: +0.5 subcarrier
+      0x8A,
+      0xD0, // -30000: -0.5 subcarrier
+      0x80,
+      0x00, // value not provided
+      0x00,
+      0x00, // padding
+  };
+  const int16_t f26[] = {30000, -30000, INT16_MIN};
+  xran_se26_hdr_t h26;
+  int16_t fofb[XRAN_SE26_MAX_FOFB];
+  assert(xran_decode_se26(v26, sizeof(v26), XRAN_SE26_MAX_FOFB, &h26, fofb) == XRAN_ULPI_OK);
+  assert(h26.ef == 1 && h26.numFoFb == 3 && memcmp(fofb, f26, sizeof(f26)) == 0);
+  uint8_t buf[16];
+  size_t len = 0;
+  assert(xran_encode_se26(&h26, f26, buf, sizeof(buf), &len) == XRAN_ULPI_OK);
+  assert(len == sizeof(v26) && memcmp(buf, v26, len) == 0);
+
+  // Table 7.7.27.1-1 (list, 3 beamIds, padding because numElements is odd)
+  const uint8_t v27_list[] = {
+      0x1B, // ef 0 | extType 0x1B
+      0x03, // extLen 3 words
+      0x00, // beamType 00 | reserved
+      0x03, // numElements 3
+      0x00,
+      0x01, // reserved 0 | beamId 1
+      0x7F,
+      0xFF, // reserved 0 | beamId 0x7FFF
+      0x01,
+      0x00, // reserved 0 | beamId 0x0100
+      0x00,
+      0x00, // padding
+  };
+  const uint16_t b27_list[] = {1, 0x7FFF, 0x0100};
+  // Table 7.7.27.1-2 (range of 256 beamIds from 0x1234)
+  const uint8_t v27_range[] = {
+      0x9B, // ef 1 | extType 0x1B
+      0x02, // extLen 2 words
+      0x40, // beamType 01 | reserved
+      0x00, // numElements 0 (256)
+      0x12,
+      0x34, // reserved 0 | beamId 0x1234
+      0x00,
+      0x00, // padding
+  };
+  const uint16_t b27_range[] = {0x1234};
+  const struct {
+    const uint8_t *bytes;
+    size_t len;
+    xran_se27_hdr_t hdr;
+    const uint16_t *beamId;
+  } v27[] = {{v27_list, sizeof(v27_list), {.ef = 0, .beamType = XRAN_SE27_BEAM_LIST, .numElements = 3}, b27_list},
+             {v27_range, sizeof(v27_range), {.ef = 1, .beamType = XRAN_SE27_BEAM_RANGE, .numElements = 256}, b27_range}};
+  for (size_t v = 0; v < 2; v++) {
+    xran_se27_hdr_t hdr;
+    uint16_t ids[XRAN_SE27_MAX_ELEMENTS];
+    assert(xran_decode_se27(v27[v].bytes, v27[v].len, XRAN_SE27_MAX_ELEMENTS, &hdr, ids) == XRAN_ULPI_OK);
+    assert(hdr.ef == v27[v].hdr.ef && hdr.beamType == v27[v].hdr.beamType && hdr.numElements == v27[v].hdr.numElements);
+    assert(memcmp(ids, v27[v].beamId, sizeof(ids[0]) * xran_se27_num_beam_ids(&hdr)) == 0);
+    assert(xran_encode_se27(&v27[v].hdr, v27[v].beamId, buf, sizeof(buf), &len) == XRAN_ULPI_OK);
+    assert(len == v27[v].len && memcmp(buf, v27[v].bytes, len) == 0);
+  }
+  printf("SE 25, SE 26 and SE 27 byte vectors passed\n");
+}
+
 // An ST 5 section with ef = 1, then SE 10 (10b) and SE 24, walked as a receiver does: the extension lengths from
 // xran_section_ext_len(), and the SE 24 entry count from the ueIds other than 0x7FFF (7.7.24.3).
 static void test_st5_se10_se24_section(void)
@@ -797,6 +1093,10 @@ int main(void)
   test_se24_field_roundtrip();
   test_se10_vectors();
   test_se24_vectors();
+  test_se25_roundtrip();
+  test_se26_roundtrip();
+  test_se27_roundtrip();
+  test_se25_se26_se27_vectors();
   test_st5_se10_se24_section();
   printf("All ULPI tests passed!\n");
   return 0;
