@@ -6,6 +6,9 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -14,4 +17,15 @@ void exit_function(const char *file, const char *function, const int line, const
 {
   fprintf(stderr, "Error at %s:%s:%d - %s\n", file, function, line, s ? s : "None");
   exit(1);
+}
+
+#define FILL 0xA5 // written to outputs and buffers before a call, to see what the call writes
+
+static inline bool is_fill(const void *p, size_t n)
+{
+  const uint8_t *b = p;
+  for (size_t i = 0; i < n; i++)
+    if (b[i] != FILL)
+      return false;
+  return true;
 }
