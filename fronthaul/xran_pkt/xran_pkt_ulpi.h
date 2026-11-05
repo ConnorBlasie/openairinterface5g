@@ -130,6 +130,98 @@ xran_ext_err_t xran_decode_se24(const uint8_t *ext,
                                 xran_se24_hdr_t *hdr_out,
                                 xran_se24_entry_t *entries_out);
 
+/**********************************************************************
+ * SE 25: Symbol reordering for DMRS-BF (CUS v16.01 7.7.25)
+ **********************************************************************/
+
+#define XRAN_SE25_NUM_SYMBOLS 14
+// Each layer is 7 bytes after the 2-byte header, so an 8-bit extLen holds at most (255 * 4 - 2) / 7 layers
+#define XRAN_SE25_MAX_LAYERS 145
+
+typedef struct {
+  uint8_t ef;
+  int numLayers; // not a wire field: from extLen. 1 for per-window reordering (7.7.25.2), else 1 for each layer
+} xran_se25_hdr_t;
+
+typedef struct {
+  uint8_t txWinForOnAirSymbol[XRAN_SE25_NUM_SYMBOLS]; // 4 bits each; 0xF = no information, 0xE reserved (7.7.25.4)
+} xran_se25_layer_t;
+
+// Writes SE 25 with hdr->numLayers layers to buf (avail bytes), with the zero padding to the 4-byte boundary, and its
+// length to len_out. Returns XRAN_EXT_OK, XRAN_EXT_ERR_TRUNCATED or XRAN_EXT_ERR_RANGE. Nothing is written on
+// error.
+xran_ext_err_t xran_encode_se25(const xran_se25_hdr_t *hdr,
+                                const xran_se25_layer_t *layers,
+                                uint8_t *buf,
+                                size_t avail,
+                                size_t *len_out);
+
+// Decodes SE 25 from ext, with len bytes from xran_section_ext_len(). The number of layers comes from extLen: the
+// padding (0 to 3 bytes) is shorter than a layer (7 bytes). The layers go to layers_out, which has room for
+// max_layers. Returns XRAN_EXT_OK, XRAN_EXT_ERR_TOO_MANY if there are more than max_layers layers, or an error if
+// the extension is malformed. hdr_out and layers_out are not changed on error.
+xran_ext_err_t xran_decode_se25(const uint8_t *ext,
+                                size_t len,
+                                int max_layers,
+                                xran_se25_hdr_t *hdr_out,
+                                xran_se25_layer_t *layers_out);
+
+/**********************************************************************
+ * SE 26: Frequency offset feedback (CUS v16.01 7.7.26)
+ **********************************************************************/
+
+#define XRAN_SE26_MAX_FOFB 127 // 7-bit numFoFb
+
+typedef struct {
+  uint8_t ef;
+  uint8_t numFoFb; // 7 bits; 1 to 126 are valid, 0 and 127 reserved (7.7.26.2)
+} xran_se26_hdr_t;
+
+// Writes SE 26 with the hdr->numFoFb values of freqOffsetFb to buf (avail bytes), with the zero padding to the 4-byte
+// boundary, and its length to len_out. freqOffsetFb is in units of 2^(mu - 2) Hz; INT16_MIN = value not provided
+// (7.7.26.3). Returns XRAN_EXT_OK, XRAN_EXT_ERR_TRUNCATED or XRAN_EXT_ERR_RANGE. Nothing is written on error.
+xran_ext_err_t xran_encode_se26(const xran_se26_hdr_t *hdr,
+                                const int16_t *freqOffsetFb,
+                                uint8_t *buf,
+                                size_t avail,
+                                size_t *len_out);
+
+// Decodes SE 26 from ext, with len bytes from xran_section_ext_len(). The numFoFb values go to freqOffsetFb_out, which
+// has room for max_fofb. Returns XRAN_EXT_OK, XRAN_EXT_ERR_TOO_MANY if numFoFb > max_fofb, or an error if the
+// extension is malformed. hdr_out and freqOffsetFb_out are not changed on error.
+xran_ext_err_t xran_decode_se26(const uint8_t *ext, size_t len, int max_fofb, xran_se26_hdr_t *hdr_out, int16_t *freqOffsetFb_out);
+
+/**********************************************************************
+ * SE 27: O-DU controlled dimensionality reduction (CUS v16.01 7.7.27)
+ **********************************************************************/
+
+#define XRAN_SE27_BEAM_LIST 0 // list of numElements beamIds, Table 7.7.27.1-1
+#define XRAN_SE27_BEAM_RANGE 1 // range of numElements beamIds from one beamId, Table 7.7.27.1-2
+#define XRAN_SE27_MAX_ELEMENTS 256
+
+typedef struct {
+  uint8_t ef;
+  uint8_t beamType; // 2 bits, XRAN_SE27_BEAM_LIST or XRAN_SE27_BEAM_RANGE
+  int numElements; // 1 to 256; 256 is 0 on the wire
+} xran_se27_hdr_t;
+
+// Number of beamIds in the extension: numElements for a list, 1 for a range
+static inline int xran_se27_num_beam_ids(const xran_se27_hdr_t *hdr)
+{
+  return hdr->beamType == XRAN_SE27_BEAM_LIST ? hdr->numElements : 1;
+}
+
+// Writes SE 27 with the xran_se27_num_beam_ids() 15-bit values of beamId to buf (avail bytes), with the zero padding
+// to the 4-byte boundary, and its length to len_out. Returns XRAN_EXT_OK, XRAN_EXT_ERR_TRUNCATED,
+// XRAN_EXT_ERR_RANGE or XRAN_EXT_ERR_BEAM_TYPE. Nothing is written on error.
+xran_ext_err_t xran_encode_se27(const xran_se27_hdr_t *hdr, const uint16_t *beamId, uint8_t *buf, size_t avail, size_t *len_out);
+
+// Decodes SE 27 from ext, with len bytes from xran_section_ext_len(). The xran_se27_num_beam_ids() beamIds go to
+// beamId_out, which has room for max_beam_ids. Returns XRAN_EXT_OK, XRAN_EXT_ERR_TOO_MANY if there are more than
+// max_beam_ids beamIds, or an error if the extension is malformed or has a reserved beamType. hdr_out and beamId_out
+// are not changed on error.
+xran_ext_err_t xran_decode_se27(const uint8_t *ext, size_t len, int max_beam_ids, xran_se27_hdr_t *hdr_out, uint16_t *beamId_out);
+
 #ifdef __cplusplus
 }
 #endif

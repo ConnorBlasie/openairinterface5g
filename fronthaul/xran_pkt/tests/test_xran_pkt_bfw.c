@@ -507,7 +507,7 @@ static void test_strerror(void)
 {
   printf("Testing error descriptions...\n");
   const char *unknown = xran_ext_strerror(1);
-  for (int err = XRAN_EXT_ERR_ENTRY_TYPE; err <= XRAN_EXT_OK; err++) {
+  for (int err = XRAN_EXT_ERR_BEAM_TYPE; err <= XRAN_EXT_OK; err++) {
     assert(strcmp(xran_ext_strerror(err), unknown) != 0);
     for (int other = err + 1; other <= XRAN_EXT_OK; other++)
       assert(strcmp(xran_ext_strerror(err), xran_ext_strerror(other)) != 0);

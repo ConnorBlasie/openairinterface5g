@@ -30,6 +30,8 @@ const char *xran_ext_strerror(xran_ext_err_t err)
       return "field value doesn't fit its bit width";
     case XRAN_EXT_ERR_ENTRY_TYPE:
       return "reserved SE 24 entryType";
+    case XRAN_EXT_ERR_BEAM_TYPE:
+      return "reserved SE 27 beamType";
     default:
       return "unknown error";
   }

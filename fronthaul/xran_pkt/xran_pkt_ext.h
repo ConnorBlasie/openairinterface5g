@@ -23,7 +23,8 @@ typedef enum {
   XRAN_EXT_ERR_TOO_MANY = -6, // decode: more elements than the caller has room for
   XRAN_EXT_ERR_EXT_TYPE = -7, // extType is not the one of the decoder
   XRAN_EXT_ERR_RANGE = -8, // encode: a field value doesn't fit its bit width
-  XRAN_EXT_ERR_ENTRY_TYPE = -9, // SE 24 entryType 4 to 7 (reserved); keep it the lowest value
+  XRAN_EXT_ERR_ENTRY_TYPE = -9, // SE 24 entryType 4 to 7 (reserved)
+  XRAN_EXT_ERR_BEAM_TYPE = -10, // SE 27 beamType 10b or 11b (reserved); keep it the lowest value
 } xran_ext_err_t;
 
 // Description of an xran_ext_err_t value
