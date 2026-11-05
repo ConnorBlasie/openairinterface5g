@@ -24,6 +24,12 @@ const char *xran_ext_strerror(xran_ext_err_t err)
       return "reserved numBundPrb 0";
     case XRAN_EXT_ERR_TOO_MANY:
       return "more elements than the caller has room for";
+    case XRAN_EXT_ERR_EXT_TYPE:
+      return "wrong extType";
+    case XRAN_EXT_ERR_RANGE:
+      return "field value doesn't fit its bit width";
+    case XRAN_EXT_ERR_ENTRY_TYPE:
+      return "reserved SE 24 entryType";
     default:
       return "unknown error";
   }

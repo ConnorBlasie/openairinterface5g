@@ -11,16 +11,19 @@
 extern "C" {
 #endif
 
-// Result of the section extension decoders (xran_pkt_bfw.h). XRAN_EXT_ERR_ARG and XRAN_EXT_ERR_TOO_MANY come from the
-// caller; the other errors come from the packet.
+// Result of the section extension codecs (xran_pkt_bfw.h, xran_pkt_ulpi.h). XRAN_EXT_ERR_ARG and XRAN_EXT_ERR_TOO_MANY
+// come from the caller; the other decode errors come from the packet.
 typedef enum {
   XRAN_EXT_OK = 0,
   XRAN_EXT_ERR_ARG = -1, // NULL pointer or bad count from the caller
-  XRAN_EXT_ERR_TRUNCATED = -2, // the header or the extension runs past the end of the packet
+  XRAN_EXT_ERR_TRUNCATED = -2, // decode: runs past the end of the packet; encode: output buffer too small
   XRAN_EXT_ERR_EXT_LEN = -3, // extLen is 0 (reserved) or doesn't match the content and the padding
   XRAN_EXT_ERR_COMP_METH = -4, // SE 1 and SE 11 bfwCompMeth is beamspace or reserved
   XRAN_EXT_ERR_NUM_BUND_PRB = -5, // SE 11 numBundPrb is 0 (reserved)
-  XRAN_EXT_ERR_TOO_MANY = -6, // more elements than the caller has room for; keep it the lowest value
+  XRAN_EXT_ERR_TOO_MANY = -6, // decode: more elements than the caller has room for
+  XRAN_EXT_ERR_EXT_TYPE = -7, // extType is not the one of the decoder
+  XRAN_EXT_ERR_RANGE = -8, // encode: a field value doesn't fit its bit width
+  XRAN_EXT_ERR_ENTRY_TYPE = -9, // SE 24 entryType 4 to 7 (reserved); keep it the lowest value
 } xran_ext_err_t;
 
 // Description of an xran_ext_err_t value
