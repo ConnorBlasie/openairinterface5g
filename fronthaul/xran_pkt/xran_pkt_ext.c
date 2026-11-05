@@ -54,3 +54,23 @@ xran_ext_err_t xran_section_ext_len(uint8_t ext_type, const uint8_t *ext, size_t
   *len_out = words * 4;
   return XRAN_EXT_OK;
 }
+
+xran_ext_err_t xran_section_ext_chain_len(const uint8_t *ext, size_t avail, size_t *len_out)
+{
+  AssertError(ext != NULL && len_out != NULL, return XRAN_EXT_ERR_ARG, "ext %p len_out %p\n", ext, len_out);
+  size_t len = 0;
+  bool ef = true;
+  while (ef) {
+    if (len == avail)
+      return XRAN_EXT_ERR_TRUNCATED;
+    const uint8_t *e = ext + len;
+    ef = e[0] >> 7;
+    size_t ext_len;
+    xran_ext_err_t err = xran_section_ext_len(e[0] & 0x7F, e, avail - len, &ext_len);
+    if (err != XRAN_EXT_OK)
+      return err;
+    len += ext_len;
+  }
+  *len_out = len;
+  return XRAN_EXT_OK;
+}

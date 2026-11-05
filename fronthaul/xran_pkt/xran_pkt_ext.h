@@ -36,6 +36,12 @@ const char *xran_ext_strerror(xran_ext_err_t err);
 // XRAN_EXT_ERR_EXT_LEN if extLen is 0.
 xran_ext_err_t xran_section_ext_len(uint8_t ext_type, const uint8_t *ext, size_t avail, size_t *len_out);
 
+// Writes the total length in bytes of the chain of section extensions that starts at ext, with avail bytes left in the
+// packet, to len_out: each extension's ef says another one follows (CUS v16.01 7.6.2.2). The caller calls it only when
+// the section's ef is set. Section extensions are not byte-swapped, so ext can be read before or after the section
+// struct swap. Returns XRAN_EXT_OK or the error of xran_section_ext_len() for the first malformed extension.
+xran_ext_err_t xran_section_ext_chain_len(const uint8_t *ext, size_t avail, size_t *len_out);
+
 #ifdef __cplusplus
 }
 #endif

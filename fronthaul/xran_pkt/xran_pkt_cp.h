@@ -373,6 +373,30 @@ struct xran_cp_radioapp_section5 { // 8bytes (4+4)
   //  .........
 } __attribute__((__packed__));
 
+/**
+ * @ingroup xran_cp_pkt
+ *
+ * @description
+ *      Section header definition for type 10 (CUS v16.01 7.4.12 Table 7.4.12-1), O-RU to O-DU. In the common header,
+ *      dataDirection is 0 (uplink) and the filterIndex bits are reserved.
+ */
+struct xran_cp_radioapp_section10_header { // 8bytes (6+2)
+  struct xran_cp_radioapp_common_header cmnhdr;
+  uint16_t reserved;
+} __attribute__((__packed__));
+
+/**
+ * @ingroup xran_cp_pkt
+ *
+ * @description
+ *      Section definition for type 10: RRM measurement reports (CUS v16.01 7.4.12 Table 7.4.12-1). Same layout as the
+ *      type 5 section: the fields are in hdr.u1.common (symInc is reserved) and hdr.u.s5. The section extensions
+ *      (if hdr.u.s5.ef, length from xran_section_ext_chain_len()) and then the measurement reports follow.
+ */
+struct xran_cp_radioapp_section10 { // 8bytes (4+4)
+  struct xran_cp_radioapp_section_header hdr;
+} __attribute__((__packed__));
+
 /** Control Plane section types, defined in 5.4 Table 5.1 */
 enum xran_cp_sectiontype {
   XRAN_CP_SECTIONTYPE_0 = 0, /**< Unused RB or Symbols in DL or UL, not supported */
@@ -381,6 +405,7 @@ enum xran_cp_sectiontype {
   XRAN_CP_SECTIONTYPE_5 = 5, /**< UE scheduling information, not supported  */
   XRAN_CP_SECTIONTYPE_6 = 6, /**< Channel Information, not supported */
   XRAN_CP_SECTIONTYPE_7 = 7, /**< LAA, not supported */
+  XRAN_CP_SECTIONTYPE_10 = 10, /**< RRM measurement reports, O-RU to O-DU (CUS v16.01 7.4.12) */
   XRAN_CP_SECTIONTYPE_MAX
 };
 
