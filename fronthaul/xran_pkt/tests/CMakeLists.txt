@@ -52,3 +52,12 @@ target_include_directories(test_xran_pkt_ulpi_neg PRIVATE ../)
 add_dependencies(tests test_xran_pkt_ulpi_neg)
 add_test(NAME test_xran_pkt_ulpi_neg COMMAND test_xran_pkt_ulpi_neg)
 set_property(TEST test_xran_pkt_ulpi_neg PROPERTY LABELS fronthaul)
+
+# Writes the P2 ULPI C-plane formats to a pcap for a Wireshark cross-check. The ctest runs the encoders of each frame.
+add_executable(xran_pkt_p2_pcap xran_pkt_p2_pcap.c)
+target_link_libraries(xran_pkt_p2_pcap PRIVATE xran_pkt PkgConfig::dpdk ${PCAP_LIBRARIES})
+target_compile_options(xran_pkt_p2_pcap PRIVATE ${dpdk_CFLAGS})
+target_include_directories(xran_pkt_p2_pcap PRIVATE ../ ${PCAP_INCLUDE_DIRS})
+add_dependencies(tests xran_pkt_p2_pcap)
+add_test(NAME xran_pkt_p2_pcap COMMAND xran_pkt_p2_pcap ${CMAKE_CURRENT_BINARY_DIR}/p2_ulpi.pcap)
+set_property(TEST xran_pkt_p2_pcap PROPERTY LABELS fronthaul)

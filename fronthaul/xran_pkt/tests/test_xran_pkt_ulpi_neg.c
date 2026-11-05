@@ -79,6 +79,67 @@ static xran_ext_err_t dec_se24(const uint8_t *ext, size_t len)
   return dec_se24_n(ext, len, SE24_N_ENTRIES);
 }
 
+// 2 layers: content 2 + 2 * 7 = 16 bytes
+static xran_ext_err_t enc_se25(uint8_t ef, uint8_t *buf, size_t avail, size_t *len_out)
+{
+  const xran_se25_hdr_t hdr = {.ef = ef, .numLayers = 2};
+  const xran_se25_layer_t layers[] = {{{1, 1, 0, 2, 2, 3, 3, 4, 4, 5, 5, 0, 6, 6}},
+                                      {{8, 8, 7, 9, 9, 10, 10, 11, 11, 12, 12, 7, 13, 13}}};
+  return xran_encode_se25(&hdr, layers, buf, avail, len_out);
+}
+
+static xran_ext_err_t dec_se25(const uint8_t *ext, size_t len)
+{
+  xran_se25_hdr_t hdr;
+  xran_se25_layer_t layers[XRAN_SE25_MAX_LAYERS];
+  memset(&hdr, FILL, sizeof(hdr));
+  memset(layers, FILL, sizeof(layers));
+  xran_ext_err_t err = xran_decode_se25(ext, len, XRAN_SE25_MAX_LAYERS, &hdr, layers);
+  if (err != XRAN_EXT_OK)
+    assert(is_fill(&hdr, sizeof(hdr)) && is_fill(layers, sizeof(layers)));
+  return err;
+}
+
+// numFoFb 3: content 4 + 3 * 2 = 10 bytes
+static xran_ext_err_t enc_se26(uint8_t ef, uint8_t *buf, size_t avail, size_t *len_out)
+{
+  const xran_se26_hdr_t hdr = {.ef = ef, .numFoFb = 3};
+  const int16_t fofb[] = {30000, -30000, INT16_MIN};
+  return xran_encode_se26(&hdr, fofb, buf, avail, len_out);
+}
+
+static xran_ext_err_t dec_se26(const uint8_t *ext, size_t len)
+{
+  xran_se26_hdr_t hdr;
+  int16_t fofb[XRAN_SE26_MAX_FOFB];
+  memset(&hdr, FILL, sizeof(hdr));
+  memset(fofb, FILL, sizeof(fofb));
+  xran_ext_err_t err = xran_decode_se26(ext, len, XRAN_SE26_MAX_FOFB, &hdr, fofb);
+  if (err != XRAN_EXT_OK)
+    assert(is_fill(&hdr, sizeof(hdr)) && is_fill(fofb, sizeof(fofb)));
+  return err;
+}
+
+// list of 3 beamIds: content 4 + 3 * 2 = 10 bytes
+static xran_ext_err_t enc_se27(uint8_t ef, uint8_t *buf, size_t avail, size_t *len_out)
+{
+  const xran_se27_hdr_t hdr = {.ef = ef, .beamType = XRAN_SE27_BEAM_LIST, .numElements = 3};
+  const uint16_t ids[] = {1, 0x7FFF, 0x0100};
+  return xran_encode_se27(&hdr, ids, buf, avail, len_out);
+}
+
+static xran_ext_err_t dec_se27(const uint8_t *ext, size_t len)
+{
+  xran_se27_hdr_t hdr;
+  uint16_t ids[XRAN_SE27_MAX_ELEMENTS];
+  memset(&hdr, FILL, sizeof(hdr));
+  memset(ids, FILL, sizeof(ids));
+  xran_ext_err_t err = xran_decode_se27(ext, len, XRAN_SE27_MAX_ELEMENTS, &hdr, ids);
+  if (err != XRAN_EXT_OK)
+    assert(is_fill(&hdr, sizeof(hdr)) && is_fill(ids, sizeof(ids)));
+  return err;
+}
+
 typedef struct {
   const char *name;
   uint8_t ext_type;
@@ -88,7 +149,10 @@ typedef struct {
 
 static const codec_t se10_codec = {"SE 10", XRAN_CP_SECTIONEXTCMD_10, enc_se10, dec_se10};
 static const codec_t se24_codec = {"SE 24", XRAN_CP_SECTIONEXTCMD_24, enc_se24, dec_se24};
-static const codec_t *const codecs[] = {&se10_codec, &se24_codec};
+static const codec_t se25_codec = {"SE 25", XRAN_CP_SECTIONEXTCMD_25, enc_se25, dec_se25};
+static const codec_t se26_codec = {"SE 26", XRAN_CP_SECTIONEXTCMD_26, enc_se26, dec_se26};
+static const codec_t se27_codec = {"SE 27", XRAN_CP_SECTIONEXTCMD_27, enc_se27, dec_se27};
+static const codec_t *const codecs[] = {&se10_codec, &se24_codec, &se25_codec, &se26_codec, &se27_codec};
 
 // Decodes the first len bytes of ext from an exact-size heap copy
 static xran_ext_err_t decode_exact(decode_fn decode, const uint8_t *ext, size_t len)
@@ -317,6 +381,62 @@ static void test_se24_encode_errors(void)
   printf("SE 24 encode errors passed\n");
 }
 
+// SE 25: the layer count comes from extLen, so only an extLen with no layer is EXT_LEN
+static void test_se25_errors(void)
+{
+  uint8_t ext[64];
+  size_t len = encode_valid(&se25_codec, ext);
+  assert(len == 16);
+  for (uint8_t words = 1; words <= 2; words++) { // 4 and 8 bytes: no 7-byte layer after the 2-byte header
+    ext[1] = words;
+    assert(decode_exact(dec_se25, ext, len) == XRAN_EXT_ERR_EXT_LEN);
+  }
+  printf("SE 25 errors passed\n");
+}
+
+// SE 26: a numFoFb that doesn't match extLen
+static void test_se26_errors(void)
+{
+  uint8_t ext[64];
+  size_t len = encode_valid(&se26_codec, ext);
+  assert(len == 12);
+  ext[3] = 5; // content 14 bytes, 16 with the padding, not 12
+  assert(decode_exact(dec_se26, ext, len) == XRAN_EXT_ERR_EXT_LEN);
+  ext[3] = 0; // content 4 bytes, not 12
+  assert(decode_exact(dec_se26, ext, len) == XRAN_EXT_ERR_EXT_LEN);
+  printf("SE 26 errors passed\n");
+}
+
+// SE 27: beamType 10b and 11b (reserved), and a numElements that doesn't match extLen. A reserved beamType wins over a
+// length mismatch, because the length depends on the beamType.
+static void test_se27_errors(void)
+{
+  uint8_t valid[64], ext[64];
+  size_t len = encode_valid(&se27_codec, valid);
+  assert(len == 12);
+  for (int bt = 2; bt <= 3; bt++) {
+    memcpy(ext, valid, len);
+    ext[2] = (uint8_t)(bt << 6);
+    assert(decode_exact(dec_se27, ext, len) == XRAN_EXT_ERR_RESERVED);
+    ext[3] = 5;
+    assert(decode_exact(dec_se27, ext, len) == XRAN_EXT_ERR_RESERVED);
+  }
+  memcpy(ext, valid, len);
+  ext[3] = 5; // content 14 bytes, 16 with the padding, not 12
+  assert(decode_exact(dec_se27, ext, len) == XRAN_EXT_ERR_EXT_LEN);
+  ext[2] = (uint8_t)(XRAN_SE27_BEAM_RANGE << 6); // one beamId: content 6 bytes, 8 with the padding, not 12
+  assert(decode_exact(dec_se27, ext, len) == XRAN_EXT_ERR_EXT_LEN);
+
+  const xran_se27_hdr_t hdr = {.beamType = 2, .numElements = 1};
+  const uint16_t id = 1;
+  uint8_t buf[16];
+  size_t out;
+  reset_encode_out(buf, sizeof(buf), &out);
+  assert(xran_encode_se27(&hdr, &id, buf, sizeof(buf), &out) == XRAN_EXT_ERR_RESERVED);
+  assert(encode_out_untouched(buf, sizeof(buf), out));
+  printf("SE 27 errors passed\n");
+}
+
 int main(void)
 {
   test_common_decode_errors();
@@ -325,6 +445,9 @@ int main(void)
   test_se10_encode_errors();
   test_se24_errors();
   test_se24_encode_errors();
+  test_se25_errors();
+  test_se26_errors();
+  test_se27_errors();
   printf("All ULPI bad-input tests passed!\n");
   return 0;
 }
