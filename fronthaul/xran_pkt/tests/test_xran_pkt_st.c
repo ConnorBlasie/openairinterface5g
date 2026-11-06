@@ -3,20 +3,18 @@
  */
 
 // Checks the Section Type 5 and Section Type 10 structs of xran_pkt_cp.h against CUS v16.01 Tables 7.4.7-1 and
-// 7.4.12-1, and the walk of their section extensions. Wire bytes are converted with the same in-place swaps that
-// oru_packet_processor.c applies to Section Type 1: rte_be_to_cpu_32 on the common header bits and rte_be_to_cpu_64
-// on the 8-byte section.
+// 7.4.12-1 (with the field model of xran_pkt_st_wire.h), and the walk of their section extensions.
 
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
-#include <rte_byteorder.h>
 #include "xran_pkt_cp.h"
 #include "xran_pkt_ext.h"
 #include "xran_pkt_ulpi.h"
 #include "xran_pkt_test_util.h"
+#include "xran_pkt_st_wire.h"
 
 _Static_assert(sizeof(struct xran_cp_radioapp_section5_header) == 8, "Table 7.4.7-1 octets 9 to 16");
 _Static_assert(sizeof(struct xran_cp_radioapp_section5) == 8, "Table 7.4.7-1 octets 17 to 24");
@@ -28,90 +26,6 @@ _Static_assert(sizeof(struct xran_cp_radioapp_section10_header) == 8, "Table 7.4
 _Static_assert(sizeof(struct xran_cp_radioapp_section10) == 8, "Table 7.4.12-1 octets 17 to 24");
 _Static_assert(sizeof(struct xran_cp_radioapp_section10) == sizeof(struct xran_cp_radioapp_section5),
                "same layout as Section Type 5");
-
-#define HDR_LEN 8 // section header (common header + 2 bytes), the same for Section Types 5 and 10
-#define WIRE_LEN (HDR_LEN + sizeof(struct xran_cp_radioapp_section5))
-
-// The fields of Tables 7.4.7-1 and 7.4.12-1. Section Type 10 has no filterIndex, udCompHdr or symInc: those bits are
-// reserved and stay 0.
-typedef struct {
-  unsigned sectionType; // XRAN_CP_SECTIONTYPE_5 or XRAN_CP_SECTIONTYPE_10
-  // common header
-  unsigned dataDirection, payloadVersion, filterIndex, frameId, subframeId, slotId, startSymbolId, numberOfSections;
-  unsigned udIqWidth, udCompMeth; // Section Type 5 only
-  // section
-  unsigned sectionId, rb, symInc, startPrbc, numPrbc, reMask, numSymbol, ef, ueId;
-} st_fields_t;
-
-typedef union {
-  uint64_t align;
-  uint8_t bytes[WIRE_LEN];
-} st_wire_t;
-
-static void fields_to_wire(const st_fields_t *f, st_wire_t *w)
-{
-  memset(w, 0, sizeof(*w));
-  struct xran_cp_radioapp_common_header *cmn = (void *)w->bytes;
-  struct xran_cp_radioapp_section_header *sec = (void *)(w->bytes + HDR_LEN);
-  cmn->field.dataDirection = f->dataDirection;
-  cmn->field.payloadVer = f->payloadVersion;
-  cmn->field.filterIndex = f->filterIndex;
-  cmn->field.frameId = f->frameId;
-  cmn->field.subframeId = f->subframeId;
-  cmn->field.slotId = f->slotId;
-  cmn->field.startSymbolId = f->startSymbolId;
-  cmn->field.all_bits = rte_cpu_to_be_32(cmn->field.all_bits);
-  cmn->numOfSections = f->numberOfSections;
-  cmn->sectionType = f->sectionType;
-  if (f->sectionType == XRAN_CP_SECTIONTYPE_5) {
-    struct xran_cp_radioapp_section5_header *hdr = (void *)w->bytes;
-    hdr->udComp.udIqWidth = f->udIqWidth;
-    hdr->udComp.udCompMeth = f->udCompMeth;
-  }
-  sec->u1.common.sectionId = f->sectionId;
-  sec->u1.common.rb = f->rb;
-  sec->u1.common.symInc = f->symInc;
-  sec->u1.common.startPrbc = f->startPrbc;
-  sec->u1.common.numPrbc = f->numPrbc;
-  sec->u.s5.reMask = f->reMask;
-  sec->u.s5.numSymbol = f->numSymbol;
-  sec->u.s5.ef = f->ef;
-  sec->u.s5.ueId = f->ueId;
-  *((uint64_t *)sec) = rte_cpu_to_be_64(*((uint64_t *)sec));
-}
-
-static void wire_to_fields(const st_wire_t *in, st_fields_t *f)
-{
-  st_wire_t w = *in;
-  struct xran_cp_radioapp_common_header *cmn = (void *)w.bytes;
-  struct xran_cp_radioapp_section_header *sec = (void *)(w.bytes + HDR_LEN);
-  cmn->field.all_bits = rte_be_to_cpu_32(cmn->field.all_bits);
-  *((uint64_t *)sec) = rte_be_to_cpu_64(*((uint64_t *)sec));
-  assert(cmn->sectionType == XRAN_CP_SECTIONTYPE_5 || cmn->sectionType == XRAN_CP_SECTIONTYPE_10);
-  *f = (st_fields_t){.sectionType = cmn->sectionType,
-                     .dataDirection = cmn->field.dataDirection,
-                     .payloadVersion = cmn->field.payloadVer,
-                     .filterIndex = cmn->field.filterIndex,
-                     .frameId = cmn->field.frameId,
-                     .subframeId = cmn->field.subframeId,
-                     .slotId = cmn->field.slotId,
-                     .startSymbolId = cmn->field.startSymbolId,
-                     .numberOfSections = cmn->numOfSections,
-                     .sectionId = sec->u1.common.sectionId,
-                     .rb = sec->u1.common.rb,
-                     .symInc = sec->u1.common.symInc,
-                     .startPrbc = sec->u1.common.startPrbc,
-                     .numPrbc = sec->u1.common.numPrbc,
-                     .reMask = sec->u.s5.reMask,
-                     .numSymbol = sec->u.s5.numSymbol,
-                     .ef = sec->u.s5.ef,
-                     .ueId = sec->u.s5.ueId};
-  if (f->sectionType == XRAN_CP_SECTIONTYPE_5) {
-    const struct xran_cp_radioapp_section5_header *hdr = (const void *)w.bytes;
-    f->udIqWidth = hdr->udComp.udIqWidth;
-    f->udCompMeth = hdr->udComp.udCompMeth;
-  }
-}
 
 static void assert_fields_eq(const st_fields_t *a, const st_fields_t *b)
 {
@@ -142,17 +56,17 @@ static void assert_st10_reserved_zero(const st_wire_t *w)
 {
   assert((w->bytes[0] & 0x0F) == 0);
   assert(w->bytes[6] == 0 && w->bytes[7] == 0);
-  assert((w->bytes[HDR_LEN + 1] & 0x04) == 0);
+  assert((w->bytes[ST_HDR_LEN + 1] & 0x04) == 0);
 }
 
 static void roundtrip(const st_fields_t *in)
 {
   st_wire_t w;
-  fields_to_wire(in, &w);
+  st_fields_to_wire(in, &w);
   if (in->sectionType == XRAN_CP_SECTIONTYPE_10)
     assert_st10_reserved_zero(&w);
   st_fields_t out;
-  wire_to_fields(&w, &out);
+  st_wire_to_fields(&w, &out);
   assert_fields_eq(in, &out);
 }
 
@@ -223,7 +137,7 @@ static void test_field_roundtrip(void)
 
 typedef struct {
   const char *name;
-  uint8_t bytes[WIRE_LEN]; // octets 9 to 24
+  uint8_t bytes[ST_WIRE_LEN]; // octets 9 to 24
   st_fields_t fields;
 } st_vector_t;
 
@@ -354,10 +268,10 @@ static void test_spec_vectors(void)
     st_wire_t w;
     memcpy(w.bytes, vec->bytes, sizeof(w.bytes));
     st_fields_t f;
-    wire_to_fields(&w, &f);
+    st_wire_to_fields(&w, &f);
     assert_fields_eq(&f, &vec->fields);
 
-    fields_to_wire(&f, &w);
+    st_fields_to_wire(&f, &w);
     assert(memcmp(w.bytes, vec->bytes, sizeof(w.bytes)) == 0);
     printf("spec vector \"%s\" passed\n", vec->name);
   }
@@ -371,9 +285,9 @@ static void test_st5_se10_se24_section(void)
   uint8_t pkt[128] = {0};
   st_fields_t f = vectors[0].fields; // ef = 1, ueId 0x1234
   st_wire_t w;
-  fields_to_wire(&f, &w);
-  memcpy(pkt, w.bytes, WIRE_LEN);
-  size_t off = WIRE_LEN;
+  st_fields_to_wire(&f, &w);
+  memcpy(pkt, w.bytes, ST_WIRE_LEN);
+  size_t off = ST_WIRE_LEN;
 
   const xran_se10_hdr_t se10 = {.ef = 1, .beamGroupType = XRAN_SE10_BGT_10B, .numPortc = 3};
   const xran_se10_port_t se10_ports[] = {{.id = 0x1235}, {.id = 0x7FFF}, {.id = 0x1236}};
@@ -390,11 +304,11 @@ static void test_st5_se10_se24_section(void)
   size_t pkt_len = off + len;
 
   // Receive side
-  memcpy(w.bytes, pkt, WIRE_LEN);
-  wire_to_fields(&w, &f);
+  memcpy(w.bytes, pkt, ST_WIRE_LEN);
+  st_wire_to_fields(&w, &f);
   assert(f.ef == 1);
   int n_layers = f.ueId != 0x7FFF;
-  off = WIRE_LEN;
+  off = ST_WIRE_LEN;
   int ext_count = 0;
   int ef = 1;
   while (ef) {
@@ -427,8 +341,8 @@ static void test_st5_se10_se24_section(void)
   assert(ext_count == 2);
   assert(off == pkt_len);
   size_t chain_len = 0;
-  assert(xran_section_ext_chain_len(pkt + WIRE_LEN, pkt_len - WIRE_LEN, &chain_len) == XRAN_EXT_OK);
-  assert(chain_len == pkt_len - WIRE_LEN);
+  assert(xran_section_ext_chain_len(pkt + ST_WIRE_LEN, pkt_len - ST_WIRE_LEN, &chain_len) == XRAN_EXT_OK);
+  assert(chain_len == pkt_len - ST_WIRE_LEN);
   printf("ST 5 section with SE 10 and SE 24 passed\n");
 }
 
@@ -450,20 +364,20 @@ static void test_st10_report_offset(void)
       0x00,
       0x00, // reserved
   };
-  uint8_t pkt[WIRE_LEN + sizeof(tail)];
-  memcpy(pkt, vectors[2].bytes, WIRE_LEN);
-  memcpy(pkt + WIRE_LEN, tail, sizeof(tail));
+  uint8_t pkt[ST_WIRE_LEN + sizeof(tail)];
+  memcpy(pkt, vectors[2].bytes, ST_WIRE_LEN);
+  memcpy(pkt + ST_WIRE_LEN, tail, sizeof(tail));
 
   // Receive side, as the O-RU does for Section Type 1: swap the section, read ef from the struct
   st_wire_t w;
-  memcpy(w.bytes, pkt, WIRE_LEN);
+  memcpy(w.bytes, pkt, ST_WIRE_LEN);
   st_fields_t f;
-  wire_to_fields(&w, &f);
+  st_wire_to_fields(&w, &f);
   assert(f.sectionType == XRAN_CP_SECTIONTYPE_10 && f.ef == 1);
   size_t chain_len = 0;
-  assert(xran_section_ext_chain_len(pkt + WIRE_LEN, sizeof(pkt) - WIRE_LEN, &chain_len) == XRAN_EXT_OK);
-  size_t report = WIRE_LEN + chain_len;
-  assert(report == WIRE_LEN + 4);
+  assert(xran_section_ext_chain_len(pkt + ST_WIRE_LEN, sizeof(pkt) - ST_WIRE_LEN, &chain_len) == XRAN_EXT_OK);
+  size_t report = ST_WIRE_LEN + chain_len;
+  assert(report == ST_WIRE_LEN + 4);
   assert((pkt[report] & 0x7F) == 1 && ((pkt[report + 2] << 8) | pkt[report + 3]) * 4 == sizeof(pkt) - report);
   printf("ST 10 report offset passed\n");
 }
