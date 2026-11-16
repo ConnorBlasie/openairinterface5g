@@ -3,8 +3,9 @@
  */
 
 // Writes the ULPI (DMRS-BF) C-plane formats of P2 to a pcap, for a cross-check with the Wireshark O-RAN dissector:
-// Section Type 5 sections with SE 10, 24, 25, 26 and 27. The sections and extensions come from the structs of
-// xran_pkt_cp.h and the encoders of xran_pkt_ulpi.h. Usage: xran_pkt_p2_pcap OUT.pcap
+// Section Type 5 sections with SE 10, 24, 25, 26 and 27, and one Section Type 10 section with two measurement
+// reports. The sections and extensions come from the structs of xran_pkt_cp.h and the encoders of xran_pkt_ulpi.h;
+// only the measurement reports (P8.1) are hand-encoded. Usage: xran_pkt_p2_pcap OUT.pcap
 
 #include <stdio.h>
 #include <stdint.h>
@@ -84,7 +85,8 @@ static void put_ext(frame_t *f, xran_ext_err_t err)
   f->len += f->ext_len;
 }
 
-static const st_fields_t st5_base = {.dataDirection = 0,
+static const st_fields_t st5_base = {.sectionType = XRAN_CP_SECTIONTYPE_5,
+                                     .dataDirection = 0,
                                      .payloadVersion = 1,
                                      .frameId = 0x5A,
                                      .subframeId = 7,
@@ -223,6 +225,39 @@ static void frame_two_sections(frame_t *f)
   frame_end(f);
 }
 
+// Section Type 10 without extensions, with a MEAS_UE_TAE report (Table 7.4.12-2) and a MEAS_UE_LAYER_POWER report for
+// one layer (Table 7.4.12-3). The reports are hand-encoded (P8.1 adds their codec).
+static void frame_st10(frame_t *f)
+{
+  frame_begin(f, 3);
+  st_fields_t s = st5_base; // st_fields_to_wire() writes no udCompHdr for Section Type 10
+  s.sectionType = XRAN_CP_SECTIONTYPE_10;
+  s.sectionId = 3;
+  s.ef = 0;
+  s.ueId = 0x0400;
+  put_st(f, &s);
+  const uint8_t reports[] = {
+      0x81, // mf 1 | measTypeId 1 (MEAS_UE_TAE)
+      0x00, // reserved
+      0x00,
+      0x02, // measDataSize 2 words
+      0x00,
+      0x10, // ueTae
+      0x00,
+      0x00, // reserved
+      0x02, // mf 0 | measTypeId 2 (MEAS_UE_LAYER_POWER)
+      0x00, // reserved
+      0x00,
+      0x02, // measDataSize 2 words
+      0x12,
+      0x34, // ueLayerPower of the layer
+      0x00,
+      0x00, // padding
+  };
+  put(f, reports, sizeof(reports));
+  frame_end(f);
+}
+
 int main(int argc, char **argv)
 {
   if (argc != 2) {
@@ -235,7 +270,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "%s\n", pcap_geterr(p));
     return 1;
   }
-  void (*const builders[])(frame_t *) = {frame_se10_10b_se24_se25_se26, frame_se10_11b_se24_se27, frame_two_sections};
+  void (*const builders[])(frame_t *) = {frame_se10_10b_se24_se25_se26, frame_se10_11b_se24_se27, frame_two_sections, frame_st10};
   for (size_t i = 0; i < sizeof(builders) / sizeof(builders[0]); i++) {
     frame_t f;
     builders[i](&f);
