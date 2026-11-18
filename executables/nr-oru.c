@@ -232,8 +232,8 @@ static bool ul_calendar_park(ul_calendar_t *cal, ORU_t *oru, const ul_job_t *job
   return false;
 }
 
-// Dispatch the next `count` symbols of a job, one FFT job per symbol (it dispatches the beam items
-// itself, so the per-antenna FFTs are computed once).
+// Dispatch the next `count` symbols of a job: one FFT item per symbol, one pool task per used RX antenna. The last
+// antenna task dispatches the beam items, so the per-antenna FFTs are computed once.
 static void ul_calendar_dispatch(work_q_t *beam_q, work_q_t *fft_q, ORU_t *oru, const ul_job_t *job, int symbols_sent, int count)
 {
   const int sym = job->symbol + symbols_sent;
@@ -281,8 +281,8 @@ static void ul_calendar_add(ul_calendar_t *cal, work_q_t *beam_q, work_q_t *fft_
 }
 
 // Per-symbol tick: dispatch one symbol of every job parked on the current symbol's entry, re-park
-// multi-symbol continuations on the next symbol's entry. The symbol's whole job set goes into ONE
-// FFT job - the per-antenna FFTs are computed once and every job (section) of the symbol shares them.
+// multi-symbol continuations on the next symbol's entry. The symbol's whole job set goes into one FFT item (one pool
+// task per used RX antenna) - the per-antenna FFTs are computed once and every job (section) of the symbol shares them.
 static void ul_calendar_tick(ul_calendar_t *cal, work_q_t *beam_q, work_q_t *fft_q, ORU_t *oru, uint64_t reader_abs)
 {
   const int idx = reader_abs % (UL_CAL_SLOTS * NR_SYMBOLS_PER_SLOT);
@@ -1043,13 +1043,20 @@ typedef struct {
   void *fft_slot; // the FFT item whose refs this job releases on completion
 } ul_work_item_t;
 
-// One FFT job per symbol: computes each RX antenna's FFT once, then dispatches the symbol's UL
-// jobs (one per C-Plane section) as beam items. The per-antenna windows live in this item's own queue slot
+typedef struct ul_fft_item_s ul_fft_item_t;
+
+typedef struct {
+  ul_fft_item_t *item; // the item this antenna task belongs to
+  int antenna;
+} ul_fft_ant_task_t;
+
+// One FFT item per symbol, one pool task per used RX antenna: computes each RX antenna's FFT once, then dispatches the
+// symbol's UL jobs (one per C-Plane section) as beam items. The per-antenna windows live in this item's own queue slot
 // (payload after the fixed fields, 32-byte aligned - work_q slots are 32-byte aligned). Beam jobs
 // reference them via item pointers, and the slot is released by its last reader (refs), not by
-// the FFT job itself - so an FFT job arriving late for an overdue symbol computes into its own
+// the FFT tasks themselves - so an FFT task arriving late for an overdue symbol computes into its own
 // slot and can never clobber a live one.
-typedef struct {
+struct ul_fft_item_s {
   ORU_t *oru;
   int frame;
   int slot;
@@ -1058,14 +1065,27 @@ typedef struct {
   work_q_t *beam_queue; // where the beam jobs go
   int nb_jobs;
   _Atomic(int) refs; // beam jobs outstanding on this slot; the last one returns it
+  _Atomic(int) ffts_left; // antenna FFT tasks still running; the last one dispatches the beam jobs
+  ul_fft_ant_task_t ant_task[ORU_CODEBOOK_MAX_NB_TX];
   ul_job_t jobs[UL_CAL_JOBS_PER_SYMBOL];
   c16_t ant_fft[] __attribute__((aligned(32))); // nb_rx * ofdm_symbol_size samples
-} ul_fft_item_t;
+};
 
 // Total size of an FFT item including its per-antenna FFT payload (the queue's element size).
 static size_t ul_fft_item_size(size_t payload_bytes)
 {
   return sizeof(ul_fft_item_t) + payload_bytes;
+}
+
+// Release one beam job's reference on the symbol's FFT slot: its payload stays alive until the last beam job that
+// references it has finished. Read the queue before the decrement - the item is alive while refs >= 1, and the last
+// reader frees it right after.
+static void ul_fft_release(ul_fft_item_t *fft)
+{
+  work_q_t *q = fft->queue;
+  if (atomic_fetch_sub(&fft->refs, 1) == 1) {
+    work_q_done(q, fft);
+  }
 }
 
 static void ul_worker_pool_task(void *args)
@@ -1075,55 +1095,27 @@ static void ul_worker_pool_task(void *args)
   // Read fft_slot before releasing the beam slot: after work_q_done() a producer may reuse it.
   ul_fft_item_t *fft = item->fft_slot;
   work_q_done(item->queue, item);
-  if (fft != NULL) {
-    // Release the symbol's FFT slot: its payload stays alive until the last beam job that
-    // references it has finished. Read the queue before the decrement - the item is alive while
-    // refs >= 1, and the last reader frees it right after.
-    work_q_t *q = fft->queue;
-    if (atomic_fetch_sub(&fft->refs, 1) == 1) {
-      work_q_done(q, fft);
-    }
-  }
+  if (fft != NULL)
+    ul_fft_release(fft);
 }
 
-// The FFT worker: one FFT per RX antenna for the symbol, then hand each of the symbol's UL jobs
-// to the beam path. The payload lives in this item's own queue slot until the last beam job
-// releases it (refs), so the slot is safe to reference from every pushed beam item.
-static void ul_fft_pool_task(void *args)
+// Hand each of the symbol's UL jobs to the beam path once all antenna FFTs are done. The payload lives in this item's
+// own queue slot until the last beam job releases it (refs), so the slot is safe to reference from every beam job.
+// The last job runs here: it saves one pool hand-off (wakeup) on the UL send time (Ta4).
+static void ul_dispatch_beams(ul_fft_item_t *item)
 {
-  ul_fft_item_t *item = args;
   ORU_t *oru = item->oru;
-  RU_t *ru = oru->ru;
-  NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
-  const int nb_rx = ru->nb_rx;
-  const int n = fp->ofdm_symbol_size;
+  const int nb_rx = oru->ru->nb_rx;
+  const int n = oru->ru->nr_frame_parms->ofdm_symbol_size;
 
-  // Codebook mode combines every RX antenna; passthrough only reads the antennas its jobs name.
-  bool used[nb_rx];
-  const bool beamforming = oru->codebook.nb_fh_streams > 0;
-  for (int a = 0; a < nb_rx; a++)
-    used[a] = beamforming;
-  for (int i = 0; i < item->nb_jobs; i++) {
-    const int a = item->jobs[i].antenna_id;
-    if (a >= 0 && a < nb_rx)
-      used[a] = true;
-  }
-  // Window offset, N_TA and frame-boundary wrap all inside nr_symbol_fep_ul().
-  for (int a = 0; a < nb_rx; a++) {
-    if (!used[a])
-      continue;
-    nr_symbol_fep_ul(fp, (c16_t *)ru->common.rxdata[a], &item->ant_fft[a * n], item->symbol, item->slot,
-                     ru->N_TA_offset);
-  }
-
-  item->refs = item->nb_jobs; // plain store: readers only exist after the pushes below
+  item->refs = item->nb_jobs; // no reader before the pushes below
   const c16_t *ant_fft[ORU_CODEBOOK_MAX_NB_TX];
   for (int a = 0; a < nb_rx; a++) {
     ant_fft[a] = &item->ant_fft[a * n];
   }
 
   work_q_t *q = item->beam_queue;
-  for (int i = 0; i < item->nb_jobs; i++) {
+  for (int i = 0; i < item->nb_jobs - 1; i++) {
     ul_work_item_t beam = {
         .oru = oru,
         .frame = item->frame,
@@ -1138,19 +1130,38 @@ static void ul_fft_pool_task(void *args)
     if (slot == NULL) {
       __atomic_fetch_add(&oru->ul_dropped_jobs, 1, __ATOMIC_RELAXED);
       // This push never reached a worker: release the slot ourselves.
-      if (atomic_fetch_sub(&item->refs, 1) == 1) {
-        work_q_done(item->queue, item);
-      }
+      ul_fft_release(item);
       continue;
     }
     pushTpool(oru->ru->threadPool, (task_t){.args = slot, .func = ul_worker_pool_task});
   }
-  // NB: the FFT item's own slot is released by its last beam job (or the drop path above), not here.
+  const int last = item->nb_jobs - 1;
+  receive_pusch(oru, item->frame, item->slot, item->symbol, &item->jobs[last], ant_fft);
+  ul_fft_release(item); // last access to item
 }
 
-// Push one FFT job for a symbol: the FFT worker computes the RX antennas' FFTs once and then
-// dispatches the symbol's UL jobs as beam items (one FFT per antenna per symbol, shared by all
-// beams and sections).
+// One antenna's FFT for the symbol. The last of the symbol's antenna tasks dispatches the beam jobs.
+static void ul_fft_pool_task(void *args)
+{
+  const ul_fft_ant_task_t *task = args;
+  ul_fft_item_t *item = task->item;
+  RU_t *ru = item->oru->ru;
+  NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
+  const int a = task->antenna;
+  // Window offset, N_TA and frame-boundary wrap all inside nr_symbol_fep_ul().
+  nr_symbol_fep_ul(fp,
+                   (c16_t *)ru->common.rxdata[a],
+                   &item->ant_fft[a * fp->ofdm_symbol_size],
+                   item->symbol,
+                   item->slot,
+                   ru->N_TA_offset);
+  // seq_cst: the last task sees every other antenna's FFT output
+  if (atomic_fetch_sub(&item->ffts_left, 1) == 1)
+    ul_dispatch_beams(item);
+}
+
+// Push the FFT jobs for a symbol, one per RX antenna in parallel: they compute the RX antennas' FFTs once and then
+// dispatch the symbol's UL jobs as beam items (one FFT per antenna per symbol, shared by all beams and sections).
 static void dispatch_ul_fft(work_q_t *fft_q,
                             work_q_t *beam_q,
                             ORU_t *oru,
@@ -1185,7 +1196,34 @@ static void dispatch_ul_fft(work_q_t *fft_q,
     });
     return;
   }
-  pushTpool(oru->ru->threadPool, (task_t){.args = slot_ptr, .func = ul_fft_pool_task});
+  // Codebook mode combines every RX antenna; passthrough only reads the antennas its jobs name.
+  ul_fft_item_t *queued = slot_ptr;
+  const int nb_rx = oru->ru->nb_rx;
+  bool used[nb_rx];
+  const bool beamforming = oru->codebook.nb_fh_streams > 0;
+  for (int a = 0; a < nb_rx; a++)
+    used[a] = beamforming;
+  for (int i = 0; i < nb_jobs; i++) {
+    const int a = jobs[i].antenna_id;
+    if (a >= 0 && a < nb_rx)
+      used[a] = true;
+  }
+  int nb_ffts = 0;
+  for (int a = 0; a < nb_rx; a++) {
+    if (used[a])
+      queued->ant_task[nb_ffts++] = (ul_fft_ant_task_t){.item = queued, .antenna = a};
+  }
+  if (nb_ffts == 0) { // passthrough jobs that name no valid RX antenna: drop here, off the pool
+    __atomic_fetch_add(&oru->ul_dropped_jobs, nb_jobs, __ATOMIC_RELAXED);
+    RATELIMIT(UL_CAL_ERR_LOG_RATELIMIT, {
+      LOG_W(PHY, "[ORU south] no valid RX antenna at symbol %d.%d.%d, dropping %d jobs\n", frame, slot, symbol, nb_jobs);
+    });
+    work_q_done(fft_q, queued);
+    return;
+  }
+  queued->ffts_left = nb_ffts; // no reader before the pushes below
+  for (int i = 0; i < nb_ffts; i++)
+    pushTpool(oru->ru->threadPool, (task_t){.args = &queued->ant_task[i], .func = ul_fft_pool_task});
 }
 
 // O-RU-specific TX thread: TDD-aware (skips writes in UL slots) and uses a simpler
@@ -1345,8 +1383,8 @@ void *oru_south_read_thread(void *arg)
   AssertFatal(work_q_alloc(&beam_queue, UL_WORK_QUEUE_DEPTH, sizeof(ul_work_item_t)),
               "[ORU south] failed to allocate UL work queue\n");
 
-  // One FFT job per symbol computes each RX antenna's FFT once and dispatches the symbol's beam
-  // jobs; the FFT payload lives in the job's own queue slot (refcounted).
+  // One FFT item per symbol, one pool task per used RX antenna: each RX antenna's FFT is computed once, and the last
+  // antenna task dispatches the symbol's beam jobs; the FFT payload lives in the item's own queue slot (refcounted).
   AssertFatal(ru->nb_rx <= ORU_CODEBOOK_MAX_NB_TX, "nb_rx %d exceeds maximum %d\n", ru->nb_rx, ORU_CODEBOOK_MAX_NB_TX);
   work_q_t fft_queue;
   const size_t fft_payload = (size_t)ru->nb_rx * fp->ofdm_symbol_size * sizeof(c16_t);
