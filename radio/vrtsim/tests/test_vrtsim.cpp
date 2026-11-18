@@ -8,6 +8,7 @@
 #include <thread>
 #include <vector>
 #include <string>
+#include "../vrtsim_time.h"
 
 configmodule_interface_t *uniqCfg = NULL;
 
@@ -398,6 +399,29 @@ INSTANTIATE_TEST_SUITE_P(MultiUEVariations,
                          VRTSIMMultiUETest,
                          ::testing::Values(VRTSIMMultiTestCase{2, 2, 2, {"2x2", "1x2"}},
                                            VRTSIMMultiTestCase{2, 2, 2, {"1x2", "1x2"}}));
+
+// The server read sleeps to samples_to_ts(n), then the timing thread and vrtsim_get_timestamp() use ts_to_samples().
+TEST(VRTSIMTime, WakeTimeCoversSample)
+{
+  const double rate = 30.72e6 * 0.37; // timescale != 1, sample period about 88 ns
+  const struct timespec start = {1000, 999999990}; // first wake times carry into tv_sec
+  const uint64_t one_hour = rate * 3600;
+  for (uint64_t base : {(uint64_t)0, (uint64_t)1000000, one_hour}) {
+    // After about one second, double rounding in ts_to_samples() can give n - 1, see vrtsim_time.h
+    const int64_t tolerance = base == one_hour ? 1 : 0;
+    for (uint64_t n = base + 1; n < base + 200000; n++) {
+      const struct timespec wake = samples_to_ts(rate, &start, n);
+      const struct timespec prev = samples_to_ts(rate, &start, n - 1);
+      ASSERT_GE(wake.tv_nsec, 0);
+      ASSERT_LT(wake.tv_nsec, 1000000000);
+      ASSERT_GE(ts_to_samples(rate, &start, &wake), (int64_t)n - tolerance) << "n " << n;
+      const int64_t wake_ns = wake.tv_sec * 1000000000LL + wake.tv_nsec;
+      const int64_t prev_ns = prev.tv_sec * 1000000000LL + prev.tv_nsec;
+      ASSERT_LT(prev_ns, wake_ns) << "n " << n;
+    }
+  }
+  EXPECT_EQ(samples_to_ts(rate, &start, 1).tv_sec, 1001);
+}
 
 int main(int argc, char **argv)
 {

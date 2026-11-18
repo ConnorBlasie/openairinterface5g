@@ -236,6 +236,17 @@ void shm_td_iq_channel_produce_samples(ShmTDIQChannel *channel, size_t num_sampl
   mutexunlock(data->mutex);
 }
 
+void shm_td_iq_channel_produce_until(ShmTDIQChannel *channel, uint64_t timestamp)
+{
+  ShmTDIQChannelData *data = channel->data;
+  mutexlock(data->mutex);
+  if (timestamp > data->timestamp) {
+    data->timestamp = timestamp;
+    condbroadcast(data->cond);
+  }
+  mutexunlock(data->mutex);
+}
+
 int shm_td_iq_channel_wait(ShmTDIQChannel *channel, uint64_t timestamp, uint64_t timeout_uS)
 {
   ShmTDIQChannelData *data = channel->data;

@@ -21,7 +21,7 @@
  * the sample are available using shm_td_iq_channel_wait or poll using shm_td_iq_channel_rx until the return
  * value is not CHANNEL_ERROR_TOO_EARLY.
  * To indicate that samples are ready to be read by the client, call shm_td_iq_channel_produce_samples
- * (server only).
+ * or shm_td_iq_channel_produce_until (server only).
  *
  * The timestamps used in the API are in absolute samples from the time the client/server connection started.
  */
@@ -96,6 +96,16 @@ IQChannelErrorType shm_td_iq_channel_rx(ShmTDIQChannel *channel,
  * @param num_symbols The number of samples to produce.
  */
 void shm_td_iq_channel_produce_samples(ShmTDIQChannel *channel, uint64_t num_samples);
+
+/**
+ * @brief Advances the time in the channel to timestamp. Does nothing if the channel is already there.
+ * More than one thread can call it on one channel. Do not also call shm_td_iq_channel_produce_samples
+ * on that channel: a relative advance that runs at the same time can skip or repeat samples.
+ *
+ * @param channel The ShmTDIQChannel structure.
+ * @param timestamp The new current sample.
+ */
+void shm_td_iq_channel_produce_until(ShmTDIQChannel *channel, uint64_t timestamp);
 
 /**
  * @brief Wait until sample at the specified timestamp is available
