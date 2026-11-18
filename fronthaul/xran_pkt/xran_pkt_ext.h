@@ -23,7 +23,7 @@ typedef enum {
   XRAN_EXT_ERR_TOO_MANY = -6, // decode: more elements than the caller has room for
   XRAN_EXT_ERR_EXT_TYPE = -7, // extType is not the one of the decoder
   XRAN_EXT_ERR_RANGE = -8, // encode: a field value is out of its range, reserved, or unused and not 0
-  XRAN_EXT_ERR_RESERVED = -9, // a field that sets the layout has a reserved or forbidden value (SE 24 entryType)
+  XRAN_EXT_ERR_RESERVED = -9, // a field that sets the layout has a reserved or forbidden value (SE 24 entryType, SE 27 beamType)
   XRAN_EXT_ERR_MIN = XRAN_EXT_ERR_RESERVED, // the lowest value: change it when a lower value is added
 } xran_ext_err_t;
 
