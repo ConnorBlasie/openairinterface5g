@@ -1867,6 +1867,11 @@ static uint64_t prach_target_symbol(const oru_packet_processor_context_t *ctx, i
   return ctx->current_absolute_symbol + diff;
 }
 
+static bool prach_job_covers(const prach_job_t *job, uint64_t symbol)
+{
+  return job != NULL && symbol >= job->start_absolute_symbol && symbol < job->start_absolute_symbol + job->num_symbols;
+}
+
 int get_prach_beam_id(void *context, int slot_in_frame, int aarx, int symbol)
 {
   oru_bfw_set_t bfw;
@@ -2135,43 +2140,27 @@ void write_prach_iq(void *context, uint32_t **txdataF, int nb_rx, int frame, int
   if (ctx == NULL)
     return;
 
+  if (slot_in_frame < 0 || slot_in_frame >= MAX_SLOTS_PER_FRAME) {
+    RATELIMIT(PRACH_ERR_LOG_RATELIMIT, { LOG_W(HW, "PRACH UP: Invalid slot_in_frame %d\n", slot_in_frame); });
+    return;
+  }
+
   uint64_t target_absolute_symbol = prach_target_symbol(ctx, slot_in_frame, symbol);
   struct rte_mbuf *mbufs[MAX_MBUFS_PER_SYMBOL];
   uint32_t num_mbufs = 0;
+  // O-RAN CUS v16.01 §8.2.1: U-Plane follows C-Plane, so the DU selects the PRACH streams. A stream that has a job got
+  // C-Plane for this slot and is selected; a stream without one is not a miss.
+  bool selected = false;
+  const prach_job_t *missed = NULL; // job of the first selected stream that does not cover the symbol
+  int missed_aarx = -1;
 
   for (int aarx = 0; aarx < nb_rx; aarx++) {
-    if (slot_in_frame < 0 || slot_in_frame >= MAX_SLOTS_PER_FRAME) {
-      RATELIMIT(PRACH_ERR_LOG_RATELIMIT, { LOG_W(HW, "PRACH UP: Invalid slot_in_frame %d\n", slot_in_frame); });
-      continue;
-    }
     prach_job_t *job = find_prach_job(ctx, slot_in_frame, aarx, target_absolute_symbol);
-    if (job == NULL || target_absolute_symbol < job->start_absolute_symbol
-        || target_absolute_symbol >= job->start_absolute_symbol + job->num_symbols) {
-      ctx->thread_safe_stats.prach_cplane_missing++;
-      if (job == NULL) {
-        ctx->thread_safe_stats.prach_cplane_missing_inactive++;
-        RATELIMIT(PRACH_ERR_LOG_RATELIMIT,
-                  { LOG_W(HW, "PRACH UP: Missing C-Plane - Inactive job for slot %d, aarx %d\n", slot_in_frame, aarx); });
-      } else if (target_absolute_symbol < job->start_absolute_symbol) {
-        ctx->thread_safe_stats.prach_cplane_missing_early++;
-        RATELIMIT(PRACH_ERR_LOG_RATELIMIT, {
-          LOG_W(HW,
-                "PRACH UP: Missing C-Plane - Early symbol %lu (job start %lu) for slot %d, aarx %d\n",
-                target_absolute_symbol,
-                job->start_absolute_symbol,
-                slot_in_frame,
-                aarx);
-        });
-      } else {
-        ctx->thread_safe_stats.prach_cplane_missing_stale++;
-        RATELIMIT(PRACH_ERR_LOG_RATELIMIT, {
-          LOG_W(HW,
-                "PRACH UP: Missing C-Plane - Stale symbol %lu (job end %lu) for slot %d, aarx %d\n",
-                target_absolute_symbol,
-                job->start_absolute_symbol + job->num_symbols,
-                slot_in_frame,
-                aarx);
-        });
+    selected |= job != NULL;
+    if (!prach_job_covers(job, target_absolute_symbol)) {
+      if (job != NULL && missed == NULL) {
+        missed = job;
+        missed_aarx = aarx;
       }
       continue;
     }
@@ -2242,6 +2231,32 @@ void write_prach_iq(void *context, uint32_t **txdataF, int nb_rx, int frame, int
       for (int i = 0; i < prach_length * 2; i++)
         dst[ctx->prach_kbar + i] = rte_cpu_to_be_16(raw[i]);
     }
+  }
+
+  // One miss for the symbol: no stream is selected, or a selected stream does not cover it
+  if (!selected) {
+    ctx->thread_safe_stats.prach_cplane_missing++;
+    ctx->thread_safe_stats.prach_cplane_missing_inactive++;
+    RATELIMIT(PRACH_ERR_LOG_RATELIMIT, {
+      LOG_W(HW, "PRACH UP: Missing C-Plane - Inactive symbol %lu for slot %d\n", target_absolute_symbol, slot_in_frame);
+    });
+  } else if (missed != NULL) {
+    const bool early = target_absolute_symbol < missed->start_absolute_symbol;
+    ctx->thread_safe_stats.prach_cplane_missing++;
+    if (early)
+      ctx->thread_safe_stats.prach_cplane_missing_early++;
+    else
+      ctx->thread_safe_stats.prach_cplane_missing_stale++;
+    RATELIMIT(PRACH_ERR_LOG_RATELIMIT, {
+      LOG_W(HW,
+            "PRACH UP: Missing C-Plane - %s symbol %lu (job %lu-%lu) for slot %d, aarx %d\n",
+            early ? "Early" : "Stale",
+            target_absolute_symbol,
+            missed->start_absolute_symbol,
+            missed->start_absolute_symbol + missed->num_symbols,
+            slot_in_frame,
+            missed_aarx);
+    });
   }
 
   if (num_mbufs > 0) {

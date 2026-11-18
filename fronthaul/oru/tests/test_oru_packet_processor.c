@@ -2172,25 +2172,37 @@ void test_prach_generation(int prach_eaxc_offset, bool check_sequence)
   assert(get_prach_beam_id(ctx, slot_in_frame, 0, startSymbolId) == 5); // section type 3 beamId carried to the job
   assert(get_prach_beam_id(ctx, slot_in_frame, 1, startSymbolId) == -1); // no C-Plane for this stream
 
-  // 2. Call write_prach_iq for each of the 4 symbols
-  uint32_t *txdataF[1];
+  // 2. Call write_prach_iq for each of the 4 symbols, with stream 1 left without C-Plane
+  uint32_t *txdataF[2];
   uint32_t iq_input[100 * 12];
   memset(iq_input, 0, sizeof(iq_input));
   uint16_t *iq_raw = (uint16_t *)iq_input;
   for (int i = 0; i < 139 * 2; i++)
     iq_raw[i] = i + 1;
   txdataF[0] = iq_input;
+  txdataF[1] = iq_input;
 
   for (int i = 0; i < 4; i++) {
-    write_prach_iq(ctx, txdataF, 1, frameId, slot_in_frame, startSymbolId + i);
+    write_prach_iq(ctx, txdataF, 2, frameId, slot_in_frame, startSymbolId + i);
   }
 
-  // Expect 4 packets to be sent
+  // Expect 4 packets to be sent, and no miss for stream 1: the DU did not select it
   assert(g_packets_sent == 4);
+  oru_packet_processor_stats_t stats;
+  get_packet_processor_stats(ctx, &stats);
+  assert(stats.prach_cplane_missing == 0);
 
-  // Attempting to write a 5th symbol should not send a packet, as the job should be deactivated
-  write_prach_iq(ctx, txdataF, 1, frameId, slot_in_frame, startSymbolId + 4);
+  // Attempting to write a 5th symbol should not send a packet: it is after the job of stream 0
+  write_prach_iq(ctx, txdataF, 2, frameId, slot_in_frame, startSymbolId + 4);
   assert(g_packets_sent == 4);
+  get_packet_processor_stats(ctx, &stats);
+  assert(stats.prach_cplane_missing == 1 && stats.prach_cplane_missing_stale == 1);
+
+  // A slot where no stream has C-Plane is one miss for the symbol, not one for each stream
+  write_prach_iq(ctx, txdataF, 2, frameId, (slot_in_frame + 1) % (10 << mu), startSymbolId);
+  assert(g_packets_sent == 4);
+  get_packet_processor_stats(ctx, &stats);
+  assert(stats.prach_cplane_missing == 2 && stats.prach_cplane_missing_inactive == 1);
 
   if (check_sequence) {
     // Interleave both channel types, including an overlapping PUSCH antenna and sequence wrap.
@@ -3434,9 +3446,9 @@ typedef struct {
   uint16_t start_prb;
 } test_section3_t;
 
-// Sends one 4-symbol PRACH (Type 3) C-Plane message for PRACH stream 0 at symbol sym carrying n sections, with
+// Sends one 4-symbol PRACH (Type 3) C-Plane message for PRACH stream ru_port at symbol sym carrying n sections, with
 // numOfSections set to num_sections.
-static void send_prach_cplane(void *ctx, uint64_t sym, int num_sections, const test_section3_t *sec, int n)
+static void send_prach_cplane_stream(void *ctx, int ru_port, uint64_t sym, int num_sections, const test_section3_t *sec, int n)
 {
   const int slots_per_subframe = 2;
   const int num_symbols_per_frame = 10 * slots_per_subframe * 14;
@@ -3444,7 +3456,7 @@ static void send_prach_cplane(void *ctx, uint64_t sym, int num_sections, const t
   struct rte_mbuf *mbuf = rte_pktmbuf_alloc(mp);
   assert(mbuf != NULL);
   struct xran_ecpri_hdr *ecpri = (struct xran_ecpri_hdr *)rte_pktmbuf_append(mbuf, sizeof(struct xran_ecpri_hdr));
-  ecpri->ecpri_xtc_id = xran_compose_cid(&g_eaxcid_config, 0, 0, 0, 0);
+  ecpri->ecpri_xtc_id = xran_compose_cid(&g_eaxcid_config, 0, 0, 0, ru_port);
   struct xran_cp_radioapp_section3_header *apphdr =
       (struct xran_cp_radioapp_section3_header *)rte_pktmbuf_append(mbuf, sizeof(struct xran_cp_radioapp_section3_header));
   memset(apphdr, 0, sizeof(*apphdr));
@@ -3477,6 +3489,11 @@ static void send_prach_cplane(void *ctx, uint64_t sym, int num_sections, const t
     }
   }
   handle_cplane_packet(ctx, mbuf);
+}
+
+static void send_prach_cplane(void *ctx, uint64_t sym, int num_sections, const test_section3_t *sec, int n)
+{
+  send_prach_cplane_stream(ctx, 0, sym, num_sections, sec, n);
 }
 
 static int g_prach_section_ids[16];
@@ -3660,6 +3677,45 @@ void test_prach_occasions(void)
 
   cleanup_packet_processor(ctx);
   printf("PRACH occasions passed!\n");
+}
+
+// A symbol outside the PRACH jobs of all streams is one miss, not one for each stream
+void test_prach_miss_counted_once(void)
+{
+  printf("Testing PRACH miss counted once over all streams...\n");
+  void *ctx = init_prach_test_ctx();
+  const uint64_t slot_sym = 1036; // symbol 0 of a slot
+  const int num_symbols_per_frame = 10 * 2 * 14;
+  const int frame = (slot_sym / num_symbols_per_frame) % 256;
+  const int slot_in_frame = (slot_sym % num_symbols_per_frame) / 14;
+  oru_packet_processor_stats_t stats;
+
+  // Both streams have C-Plane for symbols 4-7
+  const test_section3_t sec = {1, 5};
+  for (int aarx = 0; aarx < 2; aarx++)
+    send_prach_cplane_stream(ctx, aarx, slot_sym + 4, 1, &sec, 1);
+
+  uint32_t iq_input[100 * 12] = {0};
+  uint32_t *txdataF[2] = {iq_input, iq_input};
+  write_prach_iq(ctx, txdataF, 2, frame, slot_in_frame, 0);
+  get_packet_processor_stats(ctx, &stats);
+  assert(stats.prach_cplane_missing == 1 && stats.prach_cplane_missing_early == 1);
+
+  write_prach_iq(ctx, txdataF, 2, frame, slot_in_frame, 8);
+  get_packet_processor_stats(ctx, &stats);
+  assert(stats.prach_cplane_missing == 2 && stats.prach_cplane_missing_stale == 1);
+  assert(stats.prach_cplane_missing_inactive == 0 && g_packets_sent == 0);
+
+  // One frame later the C-Plane of stream 1 is lost: stream 0 sends, stream 1 keeps its old job and is one miss
+  handle_absolute_symbol_tick(ctx, 1030 + num_symbols_per_frame);
+  send_prach_cplane_stream(ctx, 0, slot_sym + num_symbols_per_frame + 4, 1, &sec, 1);
+  write_prach_iq(ctx, txdataF, 2, (frame + 1) % 256, slot_in_frame, 4);
+  get_packet_processor_stats(ctx, &stats);
+  assert(g_packets_sent == 1);
+  assert(stats.prach_cplane_missing == 3 && stats.prach_cplane_missing_stale == 2);
+
+  cleanup_packet_processor(ctx);
+  printf("PRACH miss counted once passed!\n");
 }
 
 // The sections of a multi-section PRACH message are found past each section's extension chain. They all start at the
@@ -4400,6 +4456,8 @@ int main(int argc, char **argv)
   }
   usleep(10000);
   test_prach_occasions();
+  usleep(10000);
+  test_prach_miss_counted_once();
   usleep(10000);
   test_prach_multi_section_message();
   usleep(10000);
