@@ -35,6 +35,7 @@
 #include "taps_client.h"
 #include "cirdb_provider.h"
 #include "cirdb_yaml.h"
+#include "vrtsim_time.h"
 #include "channel_pipeline.h"
 #include "thread-pool.h"
 
@@ -263,25 +264,17 @@ static void vrtsim_readconfig(vrtsim_state_t *vrtsim_state)
 static void *vrtsim_timing_job(void *arg)
 {
   vrtsim_state_t *vrtsim_state = arg;
-  if (clock_gettime(CLOCK_REALTIME, &vrtsim_state->start_ts)) {
-    LOG_E(UTIL, "clock_gettime failed\n");
-    exit(1);
-  }
-  int64_t last_sample_index = 0;
+  const double rate = vrtsim_state->sample_rate * vrtsim_state->timescale;
   while (vrtsim_state->run_timing_thread) {
     struct timespec current_time;
     if (clock_gettime(CLOCK_REALTIME, &current_time)) {
       LOG_E(UTIL, "clock_gettime failed\n");
       exit(1);
     }
-    int64_t diff = (current_time.tv_sec - vrtsim_state->start_ts.tv_sec) * 1000000000
-                   + (current_time.tv_nsec - vrtsim_state->start_ts.tv_nsec);
-    double sample_index = vrtsim_state->sample_rate * vrtsim_state->timescale * diff / 1e9;
-    int64_t samples_to_produce = sample_index - last_sample_index;
-    if (samples_to_produce > 0) {
-      shm_td_iq_channel_produce_samples(vrtsim_state->channel, samples_to_produce);
-      last_sample_index = sample_index;
-    }
+    // A CLOCK_REALTIME step back past start_ts gives n < 0. As unsigned it would move channel time far ahead for good.
+    const int64_t n = ts_to_samples(rate, &vrtsim_state->start_ts, &current_time);
+    if (n > 0)
+      shm_td_iq_channel_produce_until(vrtsim_state->channel, n);
     usleep(20);
   }
   return 0;
@@ -567,6 +560,8 @@ static int vrtsim_connect(openair0_device_t *device)
     }
     vrtsim_state->last_received_sample = shm_td_iq_channel_get_current_sample(vrtsim_state->channel);
     if (!vrtsim_state->disable_timing_thread) {
+      // Set before the thread starts: vrtsim_read() and get_timestamp() use it from other threads
+      AssertFatal(clock_gettime(CLOCK_REALTIME, &vrtsim_state->start_ts) == 0, "clock_gettime failed\n");
       vrtsim_state->run_timing_thread = true;
       threadCreate(&vrtsim_state->timing_thread, vrtsim_timing_job, vrtsim_state, "vrtsim_timing", -1, OAI_PRIORITY_RT_MAX);
     }
@@ -986,8 +981,20 @@ static int vrtsim_read(openair0_device_t *device, openair0_timestamp_t *ptimesta
     return 0;
   }
   if (vrtsim_state->role == ROLE_SERVER) {
-    uint64_t timeout_uS = 0; // 0 means no timeout
-    shm_td_iq_channel_wait(vrtsim_state->channel, vrtsim_state->last_received_sample + nsamps, timeout_uS);
+    const uint64_t target = vrtsim_state->last_received_sample + nsamps;
+    if (!vrtsim_state->disable_timing_thread) {
+      // Wake at the due time: the timing thread lags by up to one poll tick, and Ta4 absorbs that lag.
+      const double rate = vrtsim_state->sample_rate * vrtsim_state->timescale;
+      const struct timespec wake = samples_to_ts(rate, &vrtsim_state->start_ts, target);
+      int ret;
+      while ((ret = clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &wake, NULL)) == EINTR)
+        ;
+      AssertFatal(ret == 0, "clock_nanosleep failed: %s\n", strerror(ret));
+      shm_td_iq_channel_produce_until(vrtsim_state->channel, target);
+    } else {
+      uint64_t timeout_uS = 0; // 0 means no timeout
+      shm_td_iq_channel_wait(vrtsim_state->channel, target, timeout_uS);
+    }
   } else {
     uint64_t start_sample = shm_td_iq_channel_get_current_sample(vrtsim_state->channel);
     uint64_t timeout_uS = 2 * 1000 * 1000; // 2 seconds timeout waiting for sample number to change
@@ -1156,9 +1163,7 @@ __attribute__((__visibility__("default"))) void vrtsim_produce_samples(openair0_
 openair0_timestamp_t vrtsim_get_timestamp(openair0_device_t *device, struct timespec *ts)
 {
   vrtsim_state_t *vrtsim_state = (vrtsim_state_t *)device->priv;
-  int64_t diff = (ts->tv_sec - vrtsim_state->start_ts.tv_sec) * 1000000000 + (ts->tv_nsec - vrtsim_state->start_ts.tv_nsec);
-  double diff_samples = vrtsim_state->sample_rate * vrtsim_state->timescale * diff / 1e9;
-  return diff_samples;
+  return ts_to_samples(vrtsim_state->sample_rate * vrtsim_state->timescale, &vrtsim_state->start_ts, ts);
 }
 
 __attribute__((__visibility__("default"))) int device_init(openair0_device_t *device, openair0_config_t *openair0_cfg)
