@@ -66,6 +66,9 @@ typedef enum { ROLE_SERVER = 1, ROLE_CLIENT } role;
   "Server only: comma-separated CPU cores of busy-polling helper threads. The reading thread and its helpers split " \
   "each read's antennas. Empty: the reading thread copies all antennas.\n"
 #define VRTSIM_MAX_RX_HELPERS 7
+#define CHANMOD_MAX_SAMPLES_HLP                                                                                \
+  "Split each channel-modelled write into calls of at most this many samples. Short GPU calls let the peer's " \
+  "calls run in between. 0: one call per write.\n"
 
 // clang-format off
 #define VRTSIM_PARAMS_DESC \
@@ -91,7 +94,8 @@ typedef enum { ROLE_SERVER = 1, ROLE_CLIENT } role;
      {"thread-pool",            TPOOL_HLP, .strptr = &vrtsim_state->thread_pool_cores, .defstrval = "-1,-1,-1,-1", TYPE_STRING, 0}, \
      {"shm_channel_name",       "Shared memory channel name\n", 0, .strptr = &vrtsim_state->shm_channel_name, .defstrval = DEFAULT_CHANNEL_NAME, TYPE_STRING, 0}, \
      {"disable-timing-thread",  "Disable timing thread for testing", 0, .iptr = &vrtsim_state->disable_timing_thread, .defintval = 0, TYPE_INT, 0}, \
-     {"rx_helper_cores",        RX_HELPER_CORES_HLP, 0, .strptr = &vrtsim_state->rx_helper_cores, .defstrval = NULL, TYPE_STRING, 0} \
+     {"rx_helper_cores",        RX_HELPER_CORES_HLP, 0, .strptr = &vrtsim_state->rx_helper_cores, .defstrval = NULL, TYPE_STRING, 0}, \
+     {"chanmod_max_samples",    CHANMOD_MAX_SAMPLES_HLP, 0, .iptr = &vrtsim_state->chanmod_max_samples, .defintval = 0, TYPE_INT, 0} \
   };
 // clang-format on
 
@@ -206,6 +210,7 @@ typedef struct {
   int disable_timing_thread;
   char *rx_helper_cores;
   vrtsim_rx_split_t *rx_split; // NULL: no RX helpers
+  int chanmod_max_samples;
 
   client_info_t client_info;
   pthread_t ipc_thread;
@@ -974,7 +979,16 @@ static int vrtsim_write(openair0_device_t *device,
     struct timespec ts;
     int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
     AssertFatal(ret == 0, "clock_gettime failed\n");
-    int num_samples_processed = vrtsim_write_with_chanmod(vrtsim_state, timestamp, samplesVoid, nsamps, nbAnt);
+    // The channel history (saved_samples) carries over from one call to the next, so the calls give the same output.
+    const int max_chunk = vrtsim_state->chanmod_max_samples > 0 ? vrtsim_state->chanmod_max_samples : nsamps;
+    int num_samples_processed = 0;
+    for (int off = 0; off < nsamps; off += max_chunk) {
+      const int n = min(max_chunk, nsamps - off);
+      void *chunk[nbAnt];
+      for (int a = 0; a < nbAnt; a++)
+        chunk[a] = (c16_t *)samplesVoid[a] + off;
+      num_samples_processed += vrtsim_write_with_chanmod(vrtsim_state, timestamp + off, chunk, n, nbAnt);
+    }
     struct timespec end;
     ret = clock_gettime(CLOCK_MONOTONIC, &end);
     AssertFatal(ret == 0, "clock_gettime failed\n");
