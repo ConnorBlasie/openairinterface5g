@@ -14,6 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <errno.h>
 #include <sys/epoll.h>
 #include <netdb.h>
@@ -61,6 +62,10 @@ typedef enum { ROLE_SERVER = 1, ROLE_CLIENT } role;
 #define DEFAULT_DESCRIPTOR "/tmp/vrtsim_connection"
 #define DEFAULT_CONNECTION_TIMEOUT 120
 #define TPOOL_HLP "Thread pool for channel modelling. Only used if CUDA support is disabled."
+#define RX_HELPER_CORES_HLP                                                                                          \
+  "Server only: comma-separated CPU cores of busy-polling helper threads. The reading thread and its helpers split " \
+  "each read's antennas. Empty: the reading thread copies all antennas.\n"
+#define VRTSIM_MAX_RX_HELPERS 7
 
 // clang-format off
 #define VRTSIM_PARAMS_DESC \
@@ -85,7 +90,8 @@ typedef enum { ROLE_SERVER = 1, ROLE_CLIENT } role;
      {"ue_id",                  "UE slot index 0..num_ues-1 (client only)\n", 0, .iptr = &vrtsim_state->ue_id, .defintval = 0,                  TYPE_INT,    0}, \
      {"thread-pool",            TPOOL_HLP, .strptr = &vrtsim_state->thread_pool_cores, .defstrval = "-1,-1,-1,-1", TYPE_STRING, 0}, \
      {"shm_channel_name",       "Shared memory channel name\n", 0, .strptr = &vrtsim_state->shm_channel_name, .defstrval = DEFAULT_CHANNEL_NAME, TYPE_STRING, 0}, \
-     {"disable-timing-thread",  "Disable timing thread for testing", 0, .iptr = &vrtsim_state->disable_timing_thread, .defintval = 0, TYPE_INT, 0} \
+     {"disable-timing-thread",  "Disable timing thread for testing", 0, .iptr = &vrtsim_state->disable_timing_thread, .defintval = 0, TYPE_INT, 0}, \
+     {"rx_helper_cores",        RX_HELPER_CORES_HLP, 0, .strptr = &vrtsim_state->rx_helper_cores, .defstrval = NULL, TYPE_STRING, 0} \
   };
 // clang-format on
 
@@ -125,6 +131,30 @@ typedef struct client_info_s {
   int gnb_num_rx_ant;
   ue_conf_t ues[MAX_NUM_UES];
 } client_info_t;
+
+typedef struct {
+  _Alignas(64) _Atomic uint64_t seq;
+} vrtsim_seq_t;
+
+// One server read, split by antenna: the reading thread posts it with a new sequence number and copies chunk 0;
+// helper h copies chunk h + 1 and reports the sequence it finished. Each sequence number on its own cache line.
+typedef struct {
+  ShmTDIQChannel *channel;
+  int num_chunks;
+  uint64_t timestamp;
+  int nsamps;
+  int nb_ant;
+  void **samples;
+  vrtsim_seq_t posted;
+  vrtsim_seq_t done[VRTSIM_MAX_RX_HELPERS];
+  _Atomic bool run;
+  pthread_t threads[VRTSIM_MAX_RX_HELPERS];
+} vrtsim_rx_split_t;
+
+typedef struct {
+  vrtsim_rx_split_t *split;
+  int chunk;
+} vrtsim_rx_helper_arg_t;
 
 typedef struct {
   int role;
@@ -174,12 +204,16 @@ typedef struct {
   char *thread_pool_cores;
   char *shm_channel_name;
   int disable_timing_thread;
+  char *rx_helper_cores;
+  vrtsim_rx_split_t *rx_split; // NULL: no RX helpers
 
   client_info_t client_info;
   pthread_t ipc_thread;
   bool run_ipc_thread;
   int ipc_listen_fd;
 } vrtsim_state_t;
+
+static void vrtsim_start_rx_helpers(vrtsim_state_t *vrtsim_state);
 
 static void histogram_add(histogram_t *histogram, double diff)
 {
@@ -554,6 +588,7 @@ static int vrtsim_connect(openair0_device_t *device)
       vrtsim_state->peer_rx_ant = vrtsim_state->ue_conf[0].rx_ant;
     }
     vrtsim_state->last_received_sample = shm_td_iq_channel_get_current_sample(vrtsim_state->channel);
+    vrtsim_start_rx_helpers(vrtsim_state);
     if (!vrtsim_state->disable_timing_thread) {
       // Set before the thread starts: vrtsim_read() and get_timestamp() use it from other threads
       AssertFatal(clock_gettime(CLOCK_REALTIME, &vrtsim_state->start_ts) == 0, "clock_gettime failed\n");
@@ -969,6 +1004,113 @@ static int vrtsim_write(openair0_device_t *device,
   }
 }
 
+static inline void vrtsim_spin_pause(void)
+{
+#if defined(__aarch64__)
+  __asm__ volatile("yield");
+#elif defined(__x86_64__)
+  __builtin_ia32_pause();
+#endif
+}
+
+// Copies antennas [chunk * nb_ant / num_chunks, (chunk + 1) * nb_ant / num_chunks) of the posted read. Returns the
+// status of the chunk's first antenna.
+static IQChannelErrorType vrtsim_rx_chunk(const vrtsim_rx_split_t *s, int chunk)
+{
+  const int a0 = chunk * s->nb_ant / s->num_chunks;
+  const int a1 = (chunk + 1) * s->nb_ant / s->num_chunks;
+  IQChannelErrorType first = CHANNEL_NO_ERROR;
+  for (int aarx = a0; aarx < a1; aarx++) {
+    IQChannelErrorType ret = shm_td_iq_channel_rx(s->channel, s->timestamp, s->nsamps, aarx, s->samples[aarx]);
+    if (aarx == a0)
+      first = ret;
+  }
+  return first;
+}
+
+static void *vrtsim_rx_helper(void *arg)
+{
+  vrtsim_rx_helper_arg_t *h = arg;
+  vrtsim_rx_split_t *s = h->split;
+  uint64_t seen = 0;
+  while (atomic_load_explicit(&s->run, memory_order_relaxed)) {
+    const uint64_t seq = atomic_load_explicit(&s->posted.seq, memory_order_acquire);
+    if (seq == seen) {
+      vrtsim_spin_pause();
+      continue;
+    }
+    seen = seq;
+    vrtsim_rx_chunk(s, h->chunk);
+    atomic_store_explicit(&s->done[h->chunk - 1].seq, seq, memory_order_release);
+  }
+  free(h);
+  return NULL;
+}
+
+static void vrtsim_start_rx_helpers(vrtsim_state_t *vrtsim_state)
+{
+  if (vrtsim_state->rx_helper_cores == NULL || vrtsim_state->rx_helper_cores[0] == '\0')
+    return;
+  int cores[VRTSIM_MAX_RX_HELPERS];
+  int n = 0;
+  char *list = strdup(vrtsim_state->rx_helper_cores);
+  AssertFatal(list != NULL, "strdup failed\n");
+  char *save = NULL;
+  for (char *tok = strtok_r(list, ",", &save); tok != NULL; tok = strtok_r(NULL, ",", &save)) {
+    AssertFatal(n < VRTSIM_MAX_RX_HELPERS, "rx_helper_cores: more than %d cores\n", VRTSIM_MAX_RX_HELPERS);
+    cores[n++] = atoi(tok);
+  }
+  free(list);
+  if (n == 0)
+    return;
+
+  vrtsim_rx_split_t *s = aligned_alloc(64, sizeof(*s));
+  AssertFatal(s != NULL, "rx split allocation failed\n");
+  memset(s, 0, sizeof(*s));
+  s->channel = vrtsim_state->channel;
+  s->num_chunks = n + 1;
+  atomic_store(&s->run, true);
+  for (int h = 0; h < n; h++) {
+    vrtsim_rx_helper_arg_t *arg = malloc(sizeof(*arg));
+    AssertFatal(arg != NULL, "rx helper argument allocation failed\n");
+    *arg = (vrtsim_rx_helper_arg_t){.split = s, .chunk = h + 1};
+    char name[32];
+    snprintf(name, sizeof(name), "vrtsim_rx_%d", h);
+    threadCreate(&s->threads[h], vrtsim_rx_helper, arg, name, cores[h], OAI_PRIORITY_RT_MAX);
+  }
+  vrtsim_state->rx_split = s;
+  LOG_I(HW, "VRTSIM: server reads split over the reading thread and %d helpers (cores %s)\n", n, vrtsim_state->rx_helper_cores);
+}
+
+static void vrtsim_stop_rx_helpers(vrtsim_state_t *vrtsim_state)
+{
+  vrtsim_rx_split_t *s = vrtsim_state->rx_split;
+  if (s == NULL)
+    return;
+  atomic_store(&s->run, false);
+  for (int h = 0; h < s->num_chunks - 1; h++)
+    pthread_join(s->threads[h], NULL);
+  free(s);
+  vrtsim_state->rx_split = NULL;
+}
+
+// Single-UE server read on the reading thread (chunk 0) and the RX helpers. Returns the status of antenna 0.
+static IQChannelErrorType vrtsim_rx_split_read(vrtsim_rx_split_t *s, uint64_t timestamp, int nsamps, int nb_ant, void **samples)
+{
+  s->timestamp = timestamp;
+  s->nsamps = nsamps;
+  s->nb_ant = nb_ant;
+  s->samples = samples;
+  const uint64_t seq = atomic_load_explicit(&s->posted.seq, memory_order_relaxed) + 1;
+  atomic_store_explicit(&s->posted.seq, seq, memory_order_release);
+  IQChannelErrorType ret = vrtsim_rx_chunk(s, 0);
+  for (int h = 0; h < s->num_chunks - 1; h++)
+    while (atomic_load_explicit(&s->done[h].seq, memory_order_acquire) != seq
+           && atomic_load_explicit(&s->run, memory_order_relaxed))
+      vrtsim_spin_pause();
+  return ret;
+}
+
 static int vrtsim_read(openair0_device_t *device, openair0_timestamp_t *ptimestamp, void **samplesVoid, int nsamps, int nbAnt)
 {
   vrtsim_state_t *vrtsim_state = (vrtsim_state_t *)device->priv;
@@ -1030,6 +1172,15 @@ static int vrtsim_read(openair0_device_t *device, openair0_timestamp_t *ptimesta
           }
         }
       }
+    } else if (vrtsim_state->rx_split) {
+      /* Single-UE server UL read, split by antenna over the RX helpers */
+      IQChannelErrorType ret =
+          vrtsim_rx_split_read(vrtsim_state->rx_split, vrtsim_state->last_received_sample, nsamps, nbAnt, samplesVoid);
+      if (ret == CHANNEL_ERROR_TOO_LATE) {
+        vrtsim_state->rx_samples_late += nsamps;
+      } else if (ret == CHANNEL_ERROR_TOO_EARLY) {
+        vrtsim_state->rx_early += 1;
+      }
     } else {
       /* Single-UE server UL read */
       for (int aarx = 0; aarx < nbAnt; aarx++) {
@@ -1069,6 +1220,7 @@ static void vrtsim_end(openair0_device_t *device)
     int ret = pthread_join(vrtsim_state->timing_thread, NULL);
     AssertFatal(ret == 0, "pthread_join() failed: errno: %d, %s\n", errno, strerror(errno));
   }
+  vrtsim_stop_rx_helpers(vrtsim_state);
 
   tx_timing_t *tx_timing = &vrtsim_state->tx_timing;
   if (vrtsim_state->chanmod || vrtsim_state->taps_socket || vrtsim_state->use_cirdb) {

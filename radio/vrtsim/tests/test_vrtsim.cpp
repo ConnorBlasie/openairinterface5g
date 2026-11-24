@@ -35,6 +35,7 @@ struct VRTSIMTestCase {
   int client_tx;
   int client_rx;
   std::string ue_antennas;
+  std::string rx_helper_cores = ""; // server RX helpers ("-1": not pinned); empty: none
 };
 
 class VRTSIMTest : public ::testing::TestWithParam<VRTSIMTestCase> {
@@ -67,6 +68,10 @@ class VRTSIMTest : public ::testing::TestWithParam<VRTSIMTestCase> {
                                              shm_name.c_str(),
                                              "--vrtsim.ue_config.[0].antennas",
                                              param.ue_antennas.c_str()};
+    if (!param.rx_helper_cores.empty()) {
+      server_argv.push_back("--vrtsim.rx_helper_cores");
+      server_argv.push_back(param.rx_helper_cores.c_str());
+    }
     cfg1 = load_configmodule(server_argv.size(), (char **)server_argv.data(), CONFIG_ENABLECMDLINEONLY);
     uniqCfg = cfg1;
     server_config.tx_num_channels = param.server_tx;
@@ -180,7 +185,9 @@ INSTANTIATE_TEST_SUITE_P(AntennaVariations,
                          ::testing::Values(VRTSIMTestCase{2, 2, 1, 1, "1x1"},
                                            VRTSIMTestCase{8, 8, 1, 1, "1x1"},
                                            VRTSIMTestCase{8, 8, 2, 2, "2x2"},
-                                           VRTSIMTestCase{1, 1, 2, 2, "2x2"}));
+                                           VRTSIMTestCase{1, 1, 2, 2, "2x2"},
+                                           VRTSIMTestCase{8, 8, 4, 4, "4x4", "-1"},
+                                           VRTSIMTestCase{8, 8, 4, 4, "4x4", "-1,-1,-1"}));
 
 struct VRTSIMMultiTestCase {
   int server_tx;
