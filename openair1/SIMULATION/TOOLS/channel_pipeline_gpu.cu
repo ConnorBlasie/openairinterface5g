@@ -68,13 +68,15 @@
 // CUDA graphs kept per context, one per call shape. vrtsim uses a few shapes (symbol and slot sizes); when the
 // cache is full, the oldest graph is replaced.
 #define GPU_GRAPH_CACHE_SIZE 32
+// TX/RX block FFT plans per context: batch sizes of 8, 16, 32, ... blocks per antenna, the last one num_blocks_max
+#define GPU_MAX_FFT_PLANS 8
 
 __global__ void gather_zero_pad_tx_block_kernel(const c16_t *const *__restrict__ tx_sig0,
                                                 const c16_t *const *__restrict__ tx_sig1,
                                                 int num_samples_tx_sig0,
                                                 int x_len,
                                                 int block_len,
-                                                int num_blocks_max,
+                                                int block_stride,
                                                 cufftComplex *__restrict__ tx_time)
 {
   int aatx = blockIdx.y;
@@ -96,7 +98,7 @@ __global__ void gather_zero_pad_tx_block_kernel(const c16_t *const *__restrict__
       val.y = (float)s.i;
     }
   }
-  tx_time[(aatx * num_blocks_max + block) * GPU_FFT_SIZE + idx] = val;
+  tx_time[(aatx * block_stride + block) * GPU_FFT_SIZE + idx] = val;
 }
 
 // blockIdx.y indexes `channel` in the caller's link order (rx * nb_tx + aatx, matching
@@ -125,7 +127,7 @@ __global__ void gather_zero_pad_channel_kernel(const cf_t *const *__restrict__ c
 __global__ void freq_multiply_accumulate_block_kernel(const cufftComplex *__restrict__ tx_freq,
                                                       const cufftComplex *__restrict__ chan_freq,
                                                       int nb_tx,
-                                                      int num_blocks_max,
+                                                      int block_stride,
                                                       cufftComplex *__restrict__ rx_freq_accum)
 {
   int rx = blockIdx.y;
@@ -135,13 +137,13 @@ __global__ void freq_multiply_accumulate_block_kernel(const cufftComplex *__rest
     return;
   cufftComplex acc = {0.0f, 0.0f};
   for (int aatx = 0; aatx < nb_tx; aatx++) {
-    cufftComplex a = tx_freq[(aatx * num_blocks_max + block) * GPU_FFT_SIZE + bin];
+    cufftComplex a = tx_freq[(aatx * block_stride + block) * GPU_FFT_SIZE + bin];
     int link = rx * nb_tx + aatx;
     cufftComplex b = chan_freq[link * GPU_FFT_SIZE + bin];
     acc.x += a.x * b.x - a.y * b.y;
     acc.y += a.x * b.y + a.y * b.x;
   }
-  rx_freq_accum[(rx * num_blocks_max + block) * GPU_FFT_SIZE + bin] = acc;
+  rx_freq_accum[(rx * block_stride + block) * GPU_FFT_SIZE + bin] = acc;
 }
 
 // Overlap-add: each block's inverse-FFT result covers GPU_FFT_SIZE samples of the full linear
@@ -150,7 +152,7 @@ __global__ void freq_multiply_accumulate_block_kernel(const cufftComplex *__rest
 __global__ void scatter_add_block_kernel(const cufftComplex *__restrict__ rx_time,
                                          int block_len,
                                          int accum_len,
-                                         int num_blocks_max,
+                                         int block_stride,
                                          cufftComplex *__restrict__ rx_accum)
 {
   int rx = blockIdx.y;
@@ -161,7 +163,7 @@ __global__ void scatter_add_block_kernel(const cufftComplex *__restrict__ rx_tim
   int pos = block * block_len + idx;
   if (pos >= accum_len)
     return;
-  cufftComplex v = rx_time[(rx * num_blocks_max + block) * GPU_FFT_SIZE + idx];
+  cufftComplex v = rx_time[(rx * block_stride + block) * GPU_FFT_SIZE + idx];
   float scale = 1.0f / (float)GPU_FFT_SIZE;
   atomicAdd(&rx_accum[rx * accum_len + pos].x, v.x * scale);
   atomicAdd(&rx_accum[rx * accum_len + pos].y, v.y * scale);
@@ -238,15 +240,18 @@ struct GpuContext {
   int num_rx_antenna;
   // Session-actual channel_length bound and the num_blocks_max/accum_len_max it (together with
   // max_samples) implies -- replaces GPU_MAX_CHANNEL_LENGTH/GPU_MAX_NUM_BLOCKS/GPU_MAX_ACCUM_LEN
-  // for buffer sizing, cuFFT plan batch counts, and the per-antenna block stride baked into the
-  // gather/multiply/scatter kernels above.
+  // for buffer sizing and the largest cuFFT plan batch.
   int max_channel_length;
   int num_blocks_max;
   int accum_len_max;
 
-  cufftHandle tx_plan;
+  // cuFFT always transforms its whole batch, so a plan sized for num_blocks_max makes a one-symbol call pay for 1 ms of
+  // blocks. A call packs its blocks at a stride of its own num_blocks and uses the smallest plan that covers them.
+  int num_fft_plans;
+  int fft_plan_blocks[GPU_MAX_FFT_PLANS];
+  cufftHandle tx_plans[GPU_MAX_FFT_PLANS];
+  cufftHandle rx_plans[GPU_MAX_FFT_PLANS];
   cufftHandle chan_plan;
-  cufftHandle rx_plan;
 
   cufftComplex *d_tx_time;
   cufftComplex *d_tx_freq;
@@ -342,17 +347,24 @@ extern "C" void *cuda_channel_pipeline_init(int max_samples, int num_tx_antenna,
   CHECK_CUDA(cudaMalloc(&ctx->d_rx_time, rx_needed * sizeof(cufftComplex)));
   CHECK_CUDA(cudaMalloc(&ctx->d_rx_accum, rx_accum_needed * sizeof(cufftComplex)));
 
-  // Created once, for this session's actual (nb_tx, nb_rx) batch count, and never re-planned:
-  // this is what removes the per-call cufftDestroy/cufftPlan1d churn that used to happen whenever
-  // the incoming symbol size (and therefore num_blocks) changed -- nb_tx/nb_rx themselves don't
-  // change within a session, so sizing plans to them costs nothing at call time while eliminating
-  // the wasted-batch overhead described above.
-  CHECK_CUFFT(cufftPlan1d(&ctx->tx_plan, GPU_FFT_SIZE, CUFFT_C2C, num_tx_antenna * ctx->num_blocks_max));
+  // Created once, for this session's actual (nb_tx, nb_rx) and each block count bucket, and never re-planned: planning
+  // at call time costs too many cycles.
+  for (int blocks = 8;; blocks *= 2) {
+    AssertFatal(ctx->num_fft_plans < GPU_MAX_FFT_PLANS,
+                "num_blocks_max %d needs more than %d FFT plans\n",
+                ctx->num_blocks_max,
+                GPU_MAX_FFT_PLANS);
+    const int p = ctx->num_fft_plans++;
+    ctx->fft_plan_blocks[p] = blocks < ctx->num_blocks_max ? blocks : ctx->num_blocks_max;
+    CHECK_CUFFT(cufftPlan1d(&ctx->tx_plans[p], GPU_FFT_SIZE, CUFFT_C2C, num_tx_antenna * ctx->fft_plan_blocks[p]));
+    CHECK_CUFFT(cufftPlan1d(&ctx->rx_plans[p], GPU_FFT_SIZE, CUFFT_C2C, num_rx_antenna * ctx->fft_plan_blocks[p]));
+    cufftSetStream(ctx->tx_plans[p], ctx->stream);
+    cufftSetStream(ctx->rx_plans[p], ctx->stream);
+    if (ctx->fft_plan_blocks[p] == ctx->num_blocks_max)
+      break;
+  }
   CHECK_CUFFT(cufftPlan1d(&ctx->chan_plan, GPU_FFT_SIZE, CUFFT_C2C, num_tx_antenna * num_rx_antenna));
-  CHECK_CUFFT(cufftPlan1d(&ctx->rx_plan, GPU_FFT_SIZE, CUFFT_C2C, num_rx_antenna * ctx->num_blocks_max));
-  cufftSetStream(ctx->tx_plan, ctx->stream);
   cufftSetStream(ctx->chan_plan, ctx->stream);
-  cufftSetStream(ctx->rx_plan, ctx->stream);
 
   ctx->h_tx_sig0 = new const c16_t *[num_tx_antenna];
   ctx->h_tx_sig1 = new const c16_t *[num_tx_antenna];
@@ -376,9 +388,11 @@ extern "C" void cuda_channel_pipeline_shutdown(void *context_handle)
   delete[] ctx->h_tx_sig1;
   delete[] ctx->h_rx_sig0;
   delete[] ctx->h_rx_sig1;
-  cufftDestroy(ctx->tx_plan);
+  for (int p = 0; p < ctx->num_fft_plans; p++) {
+    cufftDestroy(ctx->tx_plans[p]);
+    cufftDestroy(ctx->rx_plans[p]);
+  }
   cufftDestroy(ctx->chan_plan);
-  cufftDestroy(ctx->rx_plan);
   cudaFree(ctx->d_tx_time);
   cudaFree(ctx->d_tx_freq);
   cudaFree(ctx->d_chan_time);
@@ -415,6 +429,9 @@ static void enqueue_pipeline(GpuContext *ctx,
   nvtxRangePop();
 
   const int threads = 256;
+  int plan = 0;
+  while (ctx->fft_plan_blocks[plan] < num_blocks)
+    plan++;
 
   nvtxRangePushA("gather_zero_pad_tx");
   dim3 txBlocks((GPU_FFT_SIZE + threads - 1) / threads, nb_tx, num_blocks);
@@ -423,12 +440,12 @@ static void enqueue_pipeline(GpuContext *ctx,
                                                                          num_samples_tx_sig0,
                                                                          x_len,
                                                                          block_len,
-                                                                         ctx->num_blocks_max,
+                                                                         num_blocks,
                                                                          ctx->d_tx_time);
   nvtxRangePop();
 
   nvtxRangePushA("fft_forward_tx");
-  CHECK_CUFFT(cufftExecC2C(ctx->tx_plan, ctx->d_tx_time, ctx->d_tx_freq, CUFFT_FORWARD));
+  CHECK_CUFFT(cufftExecC2C(ctx->tx_plans[plan], ctx->d_tx_time, ctx->d_tx_freq, CUFFT_FORWARD));
   nvtxRangePop();
 
   nvtxRangePushA("freq_multiply_accumulate");
@@ -436,12 +453,12 @@ static void enqueue_pipeline(GpuContext *ctx,
   freq_multiply_accumulate_block_kernel<<<mulBlocks, threads, 0, ctx->stream>>>(ctx->d_tx_freq,
                                                                                 ctx->d_chan_freq,
                                                                                 nb_tx,
-                                                                                ctx->num_blocks_max,
+                                                                                num_blocks,
                                                                                 ctx->d_rx_freq_accum);
   nvtxRangePop();
 
   nvtxRangePushA("fft_inverse_rx");
-  CHECK_CUFFT(cufftExecC2C(ctx->rx_plan, ctx->d_rx_freq_accum, ctx->d_rx_time, CUFFT_INVERSE));
+  CHECK_CUFFT(cufftExecC2C(ctx->rx_plans[plan], ctx->d_rx_freq_accum, ctx->d_rx_time, CUFFT_INVERSE));
   nvtxRangePop();
 
   nvtxRangePushA("scatter_add");
@@ -449,7 +466,7 @@ static void enqueue_pipeline(GpuContext *ctx,
   scatter_add_block_kernel<<<scatterBlocks, threads, 0, ctx->stream>>>(ctx->d_rx_time,
                                                                        block_len,
                                                                        accum_len,
-                                                                       ctx->num_blocks_max,
+                                                                       num_blocks,
                                                                        ctx->d_rx_accum);
   nvtxRangePop();
 
