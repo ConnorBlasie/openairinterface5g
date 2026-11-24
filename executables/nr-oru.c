@@ -1078,13 +1078,14 @@ void receive_prach(ORU_t *oru, int frame, int slot, int symbol, int prach_symbol
 {
   RU_t *ru = oru->ru;
   NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
-  oru->prach_item.frame = frame;
-  oru->prach_item.slot = slot;
+  prach_item_t item = oru->prach_item; // pool workers run the symbols of an occasion in parallel
+  item.frame = frame;
+  item.slot = slot;
 
   c16_t rxdataF[ru->nb_rx][NR_PRACH_SEQ_LEN_L];
   memset(rxdataF, 0, sizeof(rxdataF));
 
-  rx_nr_prach_ru_rep(&oru->prach_item,
+  rx_nr_prach_ru_rep(&item,
                      ru->common.rxdata,
                      fp,
                      ru->N_TA_offset,
@@ -1132,6 +1133,38 @@ void receive_prach(ORU_t *oru, int frame, int slot, int symbol, int prach_symbol
                           beamF[s]);
   }
   oru_fh_rx_send_prach(oru->fronthaul, (uint32_t **)beamF_ptr, nb_streams, frame, slot, symbol);
+}
+
+#define PRACH_QUEUE_DEPTH 32 // one item per PRACH symbol: more than a slot of margin
+
+typedef struct {
+  ORU_t *oru;
+  int frame;
+  int slot;
+  int symbol;
+  int prach_symbol;
+  work_q_t *queue;
+} prach_work_item_t;
+
+static void prach_pool_task(void *args)
+{
+  prach_work_item_t *item = args;
+  receive_prach(item->oru, item->frame, item->slot, item->symbol, item->prach_symbol);
+  work_q_done(item->queue, item);
+}
+
+// One DFT per RX antenna per PRACH symbol is too slow for the south read thread with many antennas: it falls behind
+// the air interface and the PRACH U-Plane misses the O-DU receive window. Run each symbol on the UL pool instead.
+static void dispatch_prach(work_q_t *q, ORU_t *oru, int frame, int slot, int symbol, int prach_symbol)
+{
+  const prach_work_item_t src = {oru, frame, slot, symbol, prach_symbol, q};
+  void *item = work_q_push(q, &src);
+  if (item == NULL) {
+    RATELIMIT(UL_CAL_ERR_LOG_RATELIMIT,
+              { LOG_W(PHY, "[ORU south] PRACH queue full at symbol %d.%d.%d, dropping it\n", frame, slot, symbol); });
+    return;
+  }
+  pushTpool(oru->ru->threadPool, (task_t){.args = item, .func = prach_pool_task});
 }
 
 // Sends one UL job (C-Plane section) for a symbol from the symbol's shared per-antenna FFTs. Only the job's PRB range
@@ -1585,6 +1618,10 @@ void *oru_south_read_thread(void *arg)
   AssertFatal(work_q_alloc(&fft_queue, UL_FFT_QUEUE_DEPTH, ul_fft_item_size(fft_payload)),
               "[ORU south] failed to allocate UL FFT queue\n");
 
+  work_q_t prach_queue;
+  AssertFatal(work_q_alloc(&prach_queue, PRACH_QUEUE_DEPTH, sizeof(prach_work_item_t)),
+              "[ORU south] failed to allocate PRACH queue\n");
+
   ul_calendar_t *ul_cal = calloc_or_fail(1, sizeof(*ul_cal)); // about 1.4 MB: too big for the thread stack
 
   while (!oai_exit) {
@@ -1622,7 +1659,7 @@ void *oru_south_read_thread(void *arg)
       }
       int prach_symbol = get_prach_symbol(oru, frame, slot, symbol, ru->numerology);
       if (prach_symbol != -1)
-        receive_prach(oru, frame, slot, symbol, prach_symbol);
+        dispatch_prach(&prach_queue, oru, frame, slot, symbol, prach_symbol);
     }
     slot++;
     if (slot == fp->slots_per_frame) {
