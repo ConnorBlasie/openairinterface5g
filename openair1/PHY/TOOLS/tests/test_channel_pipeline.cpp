@@ -154,6 +154,108 @@ TEST_P(ChannelConvolutionTest, CompareCpuGpu)
     delete[] output_gpu[i];
   }
 }
+
+// Calls like vrtsim makes them on one context: TX split into history (tx_sig0) and new samples (tx_sig1), new
+// buffer addresses and a different sample count on most calls, and taps that stay the same, change in place
+// (same pointers) or move to other buffers. Every call must match the CPU reference.
+TEST(ChannelPipelineGpuSequence, EveryCallMatchesCpu)
+{
+  const int channel_length = 16;
+  const int hist = channel_length - 1;
+  const int num_calls = 80;
+  const int shapes[][2] = {{4, 4}, {8, 4}, {4, 8}}; // {nb_tx, nb_rx}
+  for (auto &shape : shapes) {
+    const int nb_tx = shape[0];
+    const int nb_rx = shape[1];
+    const int links = nb_tx * nb_rx;
+    void *ctx = cuda_channel_pipeline_init(MAX_SAMPLE_LENGTH, nb_tx, nb_rx, channel_length);
+    ASSERT_NE(ctx, nullptr);
+
+    std::vector<cf_t> taps[2];
+    std::vector<cf_t *> chan[2];
+    // Taps in [-0.25, 0.25] and inputs in [-250, 250]: the sum over 8 TX x 16 taps stays inside int16, so the test
+    // compares the convolution, not how each side wraps an overflow.
+    auto fill_taps = [&](int set) {
+      for (int l = 0; l < links; l++) {
+        generate_random_signal_float(chan[set][l], channel_length);
+        for (int j = 0; j < channel_length; j++) {
+          chan[set][l][j].r *= 0.00025;
+          chan[set][l][j].i *= 0.00025;
+        }
+      }
+    };
+    for (int set = 0; set < 2; set++) {
+      taps[set].resize(links * channel_length);
+      for (int l = 0; l < links; l++)
+        chan[set].push_back(&taps[set][l * channel_length]);
+      fill_taps(set);
+    }
+
+    for (int c = 0; c < num_calls; c++) {
+      const int num_samples = 1000 + 97 * (c % 40); // 40 sizes (more than any per-shape cache), each used twice
+      if (c % 10 == 5)
+        fill_taps(0); // new taps, same pointers
+      const int set = (c / 15) % 2;
+
+      std::vector<std::vector<c16_t>> tx0(nb_tx, std::vector<c16_t>(hist));
+      std::vector<std::vector<c16_t>> tx1(nb_tx, std::vector<c16_t>(num_samples));
+      std::vector<const c16_t *> tx0_p(nb_tx), tx1_p(nb_tx);
+      for (int a = 0; a < nb_tx; a++) {
+        generate_random_signal(tx0[a].data(), hist);
+        generate_random_signal(tx1[a].data(), num_samples);
+        for (auto &s : tx0[a]) {
+          s.r >>= 2;
+          s.i >>= 2;
+        }
+        for (auto &s : tx1[a]) {
+          s.r >>= 2;
+          s.i >>= 2;
+        }
+        tx0_p[a] = tx0[a].data();
+        tx1_p[a] = tx1[a].data();
+      }
+      std::vector<std::vector<c16_t>> out_cpu(nb_rx, std::vector<c16_t>(num_samples));
+      std::vector<std::vector<c16_t>> out_gpu(nb_rx, std::vector<c16_t>(num_samples));
+      std::vector<c16_t *> out_cpu_p(nb_rx), out_gpu_p(nb_rx);
+      for (int r = 0; r < nb_rx; r++) {
+        out_cpu_p[r] = out_cpu[r].data();
+        out_gpu_p[r] = out_gpu[r].data();
+      }
+
+      channel_convolution_cpu((const cf_t **)chan[set].data(),
+                              tx0_p.data(),
+                              tx1_p.data(),
+                              hist,
+                              out_cpu_p.data(),
+                              nullptr,
+                              num_samples,
+                              num_samples,
+                              channel_length,
+                              nb_tx,
+                              nb_rx);
+      cuda_channel_pipeline(ctx,
+                            (const cf_t **)chan[set].data(),
+                            tx0_p.data(),
+                            tx1_p.data(),
+                            hist,
+                            out_gpu_p.data(),
+                            nullptr,
+                            num_samples,
+                            num_samples,
+                            channel_length,
+                            nb_tx,
+                            nb_rx,
+                            0.0f);
+
+      int mismatches = 0;
+      for (int r = 0; r < nb_rx; r++)
+        for (int i = 0; i < num_samples; i++)
+          mismatches += std::abs(out_cpu[r][i].r - out_gpu[r][i].r) > 7 || std::abs(out_cpu[r][i].i - out_gpu[r][i].i) > 7;
+      EXPECT_EQ(mismatches, 0) << "nb_tx=" << nb_tx << " nb_rx=" << nb_rx << " call=" << c << " num_samples=" << num_samples;
+    }
+    cuda_channel_pipeline_shutdown(ctx);
+  }
+}
 #endif
 
 TEST_P(ChannelConvolutionTest, CompareCpuTpool)

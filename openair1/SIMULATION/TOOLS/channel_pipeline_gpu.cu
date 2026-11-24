@@ -14,6 +14,7 @@
 #include "oai_cuda.h"
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <nvtx3/nvToolsExt.h>
@@ -64,6 +65,9 @@
 // (num_samples, channel_length): (num_blocks - 1) * block_len < x_len = num_samples +
 // channel_length - 1, so accum_len < num_samples + channel_length - 1 + GPU_FFT_SIZE.
 #define GPU_MAX_ACCUM_LEN (GPU_MAX_SAMPLES + GPU_MAX_CHANNEL_LENGTH - 1 + GPU_FFT_SIZE)
+// CUDA graphs kept per context, one per call shape. vrtsim uses a few shapes (symbol and slot sizes); when the
+// cache is full, the oldest graph is replaced.
+#define GPU_GRAPH_CACHE_SIZE 32
 
 __global__ void gather_zero_pad_tx_block_kernel(const c16_t *const *__restrict__ tx_sig0,
                                                 const c16_t *const *__restrict__ tx_sig1,
@@ -196,6 +200,32 @@ __global__ void extract_and_noise_block_kernel(const cufftComplex *__restrict__ 
   }
 }
 
+// Everything the captured kernels and cuFFT calls bake in, other than the context buffers.
+struct GraphKey {
+  int num_samples;
+  int num_samples_tx_sig0;
+  int num_samples_rx_sig0;
+  int channel_length;
+  int nb_tx;
+  int nb_rx;
+  float noise_power;
+  bool has_tx_sig1;
+  bool has_rx_sig1;
+};
+
+static bool same_key(const GraphKey &a, const GraphKey &b)
+{
+  return a.num_samples == b.num_samples && a.num_samples_tx_sig0 == b.num_samples_tx_sig0
+         && a.num_samples_rx_sig0 == b.num_samples_rx_sig0 && a.channel_length == b.channel_length && a.nb_tx == b.nb_tx
+         && a.nb_rx == b.nb_rx && a.noise_power == b.noise_power && a.has_tx_sig1 == b.has_tx_sig1
+         && a.has_rx_sig1 == b.has_rx_sig1;
+}
+
+struct GraphEntry {
+  GraphKey key;
+  cudaGraphExec_t exec;
+};
+
 struct GpuContext {
   cudaStream_t stream;
   curandState_t *curand_states;
@@ -225,6 +255,24 @@ struct GpuContext {
   cufftComplex *d_rx_freq_accum;
   cufftComplex *d_rx_time;
   cufftComplex *d_rx_accum;
+
+  // Fixed host addresses of the per-call pointer arrays. A graph bakes in kernel arguments, so its kernels get
+  // these addresses and the CPU copies the caller's pointers here before each launch (GPU reads host memory
+  // directly, see cudaDevAttrPageableMemoryAccess in cuda_channel_pipeline_init()).
+  const c16_t **h_tx_sig0;
+  const c16_t **h_tx_sig1;
+  c16_t **h_rx_sig0;
+  c16_t **h_rx_sig1;
+  GraphEntry graphs[GPU_GRAPH_CACHE_SIZE];
+  int num_graphs;
+  int next_graph;
+
+  // Taps behind the current d_chan_freq. The CIR changes far less often than calls happen (vrtsim: once per
+  // CIR snapshot), so a call with the same taps reuses d_chan_freq. chan_cache_nb_tx == 0: no taps yet.
+  cf_t *h_chan_cache;
+  int chan_cache_nb_tx;
+  int chan_cache_nb_rx;
+  int chan_cache_length;
 };
 
 // max_samples/GPU_MAX_NUM_BLOCKS stay sized for the architectural worst case (per-call sample
@@ -306,6 +354,12 @@ extern "C" void *cuda_channel_pipeline_init(int max_samples, int num_tx_antenna,
   cufftSetStream(ctx->chan_plan, ctx->stream);
   cufftSetStream(ctx->rx_plan, ctx->stream);
 
+  ctx->h_tx_sig0 = new const c16_t *[num_tx_antenna];
+  ctx->h_tx_sig1 = new const c16_t *[num_tx_antenna];
+  ctx->h_rx_sig0 = new c16_t *[num_rx_antenna];
+  ctx->h_rx_sig1 = new c16_t *[num_rx_antenna];
+  ctx->h_chan_cache = new cf_t[num_tx_antenna * num_rx_antenna * max_channel_length];
+
   return (void *)ctx;
 }
 
@@ -315,6 +369,13 @@ extern "C" void cuda_channel_pipeline_shutdown(void *context_handle)
     return;
   }
   GpuContext *ctx = (GpuContext *)context_handle;
+  for (int i = 0; i < ctx->num_graphs; i++)
+    cudaGraphExecDestroy(ctx->graphs[i].exec);
+  delete[] ctx->h_chan_cache;
+  delete[] ctx->h_tx_sig0;
+  delete[] ctx->h_tx_sig1;
+  delete[] ctx->h_rx_sig0;
+  delete[] ctx->h_rx_sig1;
   cufftDestroy(ctx->tx_plan);
   cufftDestroy(ctx->chan_plan);
   cufftDestroy(ctx->rx_plan);
@@ -328,6 +389,82 @@ extern "C" void cuda_channel_pipeline_shutdown(void *context_handle)
   CHECK_CUDA(cudaStreamDestroy(ctx->stream));
   destroy_curand_states_cuda((void *)ctx->curand_states);
   delete ctx;
+}
+
+// Queues one call's GPU work on ctx->stream as the body of a captured graph. The channel FFT is not part of it:
+// cuda_channel_pipeline() updates d_chan_freq only when the taps change.
+static void enqueue_pipeline(GpuContext *ctx,
+                             const c16_t *const *tx_sig0,
+                             const c16_t *const *tx_sig1,
+                             int num_samples_tx_sig0,
+                             c16_t **rx_sig0,
+                             c16_t **rx_sig1,
+                             int num_samples_rx_sig0,
+                             int num_samples,
+                             int nb_tx,
+                             int nb_rx,
+                             float noise_power,
+                             int x_len,
+                             int window_offset,
+                             int block_len,
+                             int num_blocks,
+                             int accum_len)
+{
+  nvtxRangePushA("memset_rx_accum");
+  CHECK_CUDA(cudaMemsetAsync(ctx->d_rx_accum, 0, (size_t)nb_rx * accum_len * sizeof(cufftComplex), ctx->stream));
+  nvtxRangePop();
+
+  const int threads = 256;
+
+  nvtxRangePushA("gather_zero_pad_tx");
+  dim3 txBlocks((GPU_FFT_SIZE + threads - 1) / threads, nb_tx, num_blocks);
+  gather_zero_pad_tx_block_kernel<<<txBlocks, threads, 0, ctx->stream>>>(tx_sig0,
+                                                                         tx_sig1,
+                                                                         num_samples_tx_sig0,
+                                                                         x_len,
+                                                                         block_len,
+                                                                         ctx->num_blocks_max,
+                                                                         ctx->d_tx_time);
+  nvtxRangePop();
+
+  nvtxRangePushA("fft_forward_tx");
+  CHECK_CUFFT(cufftExecC2C(ctx->tx_plan, ctx->d_tx_time, ctx->d_tx_freq, CUFFT_FORWARD));
+  nvtxRangePop();
+
+  nvtxRangePushA("freq_multiply_accumulate");
+  dim3 mulBlocks((GPU_FFT_SIZE + threads - 1) / threads, nb_rx, num_blocks);
+  freq_multiply_accumulate_block_kernel<<<mulBlocks, threads, 0, ctx->stream>>>(ctx->d_tx_freq,
+                                                                                ctx->d_chan_freq,
+                                                                                nb_tx,
+                                                                                ctx->num_blocks_max,
+                                                                                ctx->d_rx_freq_accum);
+  nvtxRangePop();
+
+  nvtxRangePushA("fft_inverse_rx");
+  CHECK_CUFFT(cufftExecC2C(ctx->rx_plan, ctx->d_rx_freq_accum, ctx->d_rx_time, CUFFT_INVERSE));
+  nvtxRangePop();
+
+  nvtxRangePushA("scatter_add");
+  dim3 scatterBlocks((GPU_FFT_SIZE + threads - 1) / threads, nb_rx, num_blocks);
+  scatter_add_block_kernel<<<scatterBlocks, threads, 0, ctx->stream>>>(ctx->d_rx_time,
+                                                                       block_len,
+                                                                       accum_len,
+                                                                       ctx->num_blocks_max,
+                                                                       ctx->d_rx_accum);
+  nvtxRangePop();
+
+  nvtxRangePushA("extract_and_noise");
+  dim3 outBlocks((num_samples + threads - 1) / threads, nb_rx);
+  extract_and_noise_block_kernel<<<outBlocks, threads, 0, ctx->stream>>>(ctx->d_rx_accum,
+                                                                         accum_len,
+                                                                         window_offset,
+                                                                         rx_sig0,
+                                                                         rx_sig1,
+                                                                         num_samples_rx_sig0,
+                                                                         num_samples,
+                                                                         noise_power,
+                                                                         ctx->curand_states);
+  nvtxRangePop();
 }
 
 extern "C" void cuda_channel_pipeline(void *context_handle,
@@ -391,69 +528,97 @@ extern "C" void cuda_channel_pipeline(void *context_handle,
               accum_len,
               ctx->accum_len_max);
 
-  nvtxRangePushA("memset_rx_accum");
-  CHECK_CUDA(cudaMemsetAsync(ctx->d_rx_accum, 0, (size_t)nb_rx * accum_len * sizeof(cufftComplex), ctx->stream));
+  nvtxRangePushA("channel_cache_check");
+  const int links = nb_tx * nb_rx;
+  bool chan_changed = nb_tx != ctx->chan_cache_nb_tx || nb_rx != ctx->chan_cache_nb_rx || channel_length != ctx->chan_cache_length;
+  for (int l = 0; l < links && !chan_changed; l++)
+    chan_changed = memcmp(&ctx->h_chan_cache[l * channel_length], channel[l], channel_length * sizeof(cf_t)) != 0;
   nvtxRangePop();
+  if (chan_changed) {
+    for (int l = 0; l < links; l++)
+      memcpy(&ctx->h_chan_cache[l * channel_length], channel[l], channel_length * sizeof(cf_t));
+    ctx->chan_cache_nb_tx = nb_tx;
+    ctx->chan_cache_nb_rx = nb_rx;
+    ctx->chan_cache_length = channel_length;
 
-  const int threads = 256;
+    nvtxRangePushA("gather_zero_pad_channel");
+    const int threads = 256;
+    dim3 chanBlocks((GPU_FFT_SIZE + threads - 1) / threads, links);
+    gather_zero_pad_channel_kernel<<<chanBlocks, threads, 0, ctx->stream>>>(channel, channel_length, nb_tx, ctx->d_chan_time);
+    nvtxRangePop();
 
-  nvtxRangePushA("gather_zero_pad_tx");
-  dim3 txBlocks((GPU_FFT_SIZE + threads - 1) / threads, nb_tx, num_blocks);
-  gather_zero_pad_tx_block_kernel<<<txBlocks, threads, 0, ctx->stream>>>(tx_sig0,
-                                                                         tx_sig1,
-                                                                         num_samples_tx_sig0,
-                                                                         x_len,
-                                                                         block_len,
-                                                                         ctx->num_blocks_max,
-                                                                         ctx->d_tx_time);
-  nvtxRangePop();
+    nvtxRangePushA("fft_forward_channel");
+    CHECK_CUFFT(cufftExecC2C(ctx->chan_plan, ctx->d_chan_time, ctx->d_chan_freq, CUFFT_FORWARD));
+    nvtxRangePop();
+  }
 
-  nvtxRangePushA("gather_zero_pad_channel");
-  dim3 chanBlocks((GPU_FFT_SIZE + threads - 1) / threads, nb_tx * nb_rx);
-  gather_zero_pad_channel_kernel<<<chanBlocks, threads, 0, ctx->stream>>>(channel, channel_length, nb_tx, ctx->d_chan_time);
-  nvtxRangePop();
+  // A graph launch replaces the 7 launches of enqueue_pipeline(); the CPU launch cost, not the GPU work,
+  // dominates short calls (O-RU DL symbols).
+  for (int i = 0; i < nb_tx; i++) {
+    ctx->h_tx_sig0[i] = tx_sig0[i];
+    ctx->h_tx_sig1[i] = tx_sig1 ? tx_sig1[i] : nullptr;
+  }
+  for (int i = 0; i < nb_rx; i++) {
+    ctx->h_rx_sig0[i] = rx_sig0[i];
+    ctx->h_rx_sig1[i] = rx_sig1 ? rx_sig1[i] : nullptr;
+  }
+  const GraphKey key = {num_samples,
+                        num_samples_tx_sig0,
+                        num_samples_rx_sig0,
+                        channel_length,
+                        nb_tx,
+                        nb_rx,
+                        noise_power,
+                        tx_sig1 != nullptr,
+                        rx_sig1 != nullptr};
+  cudaGraphExec_t exec = nullptr;
+  for (int i = 0; i < ctx->num_graphs && !exec; i++)
+    if (same_key(ctx->graphs[i].key, key))
+      exec = ctx->graphs[i].exec;
+  if (!exec) {
+    nvtxRangePushA("graph_capture");
+    cudaGraph_t graph;
+    CHECK_CUDA(cudaStreamBeginCapture(ctx->stream, cudaStreamCaptureModeThreadLocal));
+    enqueue_pipeline(ctx,
+                     ctx->h_tx_sig0,
+                     ctx->h_tx_sig1,
+                     num_samples_tx_sig0,
+                     ctx->h_rx_sig0,
+                     ctx->h_rx_sig1,
+                     num_samples_rx_sig0,
+                     num_samples,
+                     nb_tx,
+                     nb_rx,
+                     noise_power,
+                     x_len,
+                     window_offset,
+                     block_len,
+                     num_blocks,
+                     accum_len);
+    CHECK_CUDA(cudaStreamEndCapture(ctx->stream, &graph));
+    CHECK_CUDA(cudaGraphInstantiate(&exec, graph, 0));
+    CHECK_CUDA(cudaGraphDestroy(graph));
+    GraphEntry *e;
+    if (ctx->num_graphs < GPU_GRAPH_CACHE_SIZE) {
+      e = &ctx->graphs[ctx->num_graphs++];
+    } else {
+      e = &ctx->graphs[ctx->next_graph];
+      ctx->next_graph = (ctx->next_graph + 1) % GPU_GRAPH_CACHE_SIZE;
+      CHECK_CUDA(cudaGraphExecDestroy(e->exec));
+    }
+    e->key = key;
+    e->exec = exec;
+    fprintf(stderr,
+            "cuda_channel_pipeline: new CUDA graph for num_samples %d, nb_tx %d, nb_rx %d (%d cached)\n",
+            num_samples,
+            nb_tx,
+            nb_rx,
+            ctx->num_graphs);
+    nvtxRangePop();
+  }
 
-  nvtxRangePushA("fft_forward_tx");
-  CHECK_CUFFT(cufftExecC2C(ctx->tx_plan, ctx->d_tx_time, ctx->d_tx_freq, CUFFT_FORWARD));
-  nvtxRangePop();
-
-  nvtxRangePushA("fft_forward_channel");
-  CHECK_CUFFT(cufftExecC2C(ctx->chan_plan, ctx->d_chan_time, ctx->d_chan_freq, CUFFT_FORWARD));
-  nvtxRangePop();
-
-  nvtxRangePushA("freq_multiply_accumulate");
-  dim3 mulBlocks((GPU_FFT_SIZE + threads - 1) / threads, nb_rx, num_blocks);
-  freq_multiply_accumulate_block_kernel<<<mulBlocks, threads, 0, ctx->stream>>>(ctx->d_tx_freq,
-                                                                                ctx->d_chan_freq,
-                                                                                nb_tx,
-                                                                                ctx->num_blocks_max,
-                                                                                ctx->d_rx_freq_accum);
-  nvtxRangePop();
-
-  nvtxRangePushA("fft_inverse_rx");
-  CHECK_CUFFT(cufftExecC2C(ctx->rx_plan, ctx->d_rx_freq_accum, ctx->d_rx_time, CUFFT_INVERSE));
-  nvtxRangePop();
-
-  nvtxRangePushA("scatter_add");
-  dim3 scatterBlocks((GPU_FFT_SIZE + threads - 1) / threads, nb_rx, num_blocks);
-  scatter_add_block_kernel<<<scatterBlocks, threads, 0, ctx->stream>>>(ctx->d_rx_time,
-                                                                       block_len,
-                                                                       accum_len,
-                                                                       ctx->num_blocks_max,
-                                                                       ctx->d_rx_accum);
-  nvtxRangePop();
-
-  nvtxRangePushA("extract_and_noise");
-  dim3 outBlocks((num_samples + threads - 1) / threads, nb_rx);
-  extract_and_noise_block_kernel<<<outBlocks, threads, 0, ctx->stream>>>(ctx->d_rx_accum,
-                                                                         accum_len,
-                                                                         window_offset,
-                                                                         rx_sig0,
-                                                                         rx_sig1,
-                                                                         num_samples_rx_sig0,
-                                                                         num_samples,
-                                                                         noise_power,
-                                                                         ctx->curand_states);
+  nvtxRangePushA("graph_launch");
+  CHECK_CUDA(cudaGraphLaunch(exec, ctx->stream));
   nvtxRangePop();
 
   nvtxRangePushA("stream_synchronize");
