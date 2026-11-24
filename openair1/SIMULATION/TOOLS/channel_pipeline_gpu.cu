@@ -45,7 +45,7 @@
 // Worst-case bounds every GPU buffer and cuFFT plan is sized for, once, at init. A call whose
 // num_samples/nb_tx/nb_rx/channel_length exceeds one of these aborts via AssertFatal rather than
 // silently reallocating/replanning.
-#define GPU_MAX_SAMPLES 65536
+#define GPU_MAX_SAMPLES 131072 // SE11 gh5: 273 PRB at 122.88 Msps = 122880 samples per 1 ms block
 #define GPU_MAX_NUM_TX_ANT 64
 #define GPU_MAX_NUM_RX_ANT 64
 // Both TX and RX can independently reach GPU_MAX_NUM_TX_ANT/GPU_MAX_NUM_RX_ANT (e.g. 4 TX on the UE
