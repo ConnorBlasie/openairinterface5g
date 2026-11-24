@@ -754,7 +754,9 @@ static int vrtsim_write_internal(vrtsim_state_t *vrtsim_state, openair0_timestam
   tx_timing->average_tx_budget = .05 * budget + .95 * tx_timing->average_tx_budget;
   histogram_add(&tx_timing->tx_histogram, budget);
 
-  int ret = shm_td_iq_channel_tx(vrtsim_state->channel, timestamp, nsamps, aarx, (sample_t *)samples);
+  // samples == NULL: the channel pipeline already wrote the span in place (shm_td_iq_channel_tx_ptr())
+  int ret = samples ? shm_td_iq_channel_tx(vrtsim_state->channel, timestamp, nsamps, aarx, (sample_t *)samples)
+                    : shm_td_iq_channel_tx_commit(vrtsim_state->channel, timestamp, nsamps, aarx);
 
   if (ret == CHANNEL_ERROR_TOO_LATE) {
     tx_timing->tx_samples_late += nsamps;
@@ -841,10 +843,19 @@ static int vrtsim_write_with_chanmod(vrtsim_state_t *vrtsim_state,
         }
       }
     }
+    // Write the output straight into the shm ring, which saves one memcpy per RX antenna. Use the stack buffer if a
+    // span is late, too early or wraps: a wrap would split the output and change the pipeline's call shape.
     c16_t output[nb_rx][nsamps] __attribute__((aligned(32)));
     c16_t *output_ptr[nb_rx] __attribute__((aligned(32)));
+    bool in_place = true;
     for (int aarx = 0; aarx < nb_rx; aarx++) {
-      output_ptr[aarx] = output[aarx];
+      output_ptr[aarx] = (c16_t *)shm_td_iq_channel_tx_ptr(vrtsim_state->channel, timestamp, nsamps, rx_antenna_offset + aarx);
+      in_place &= output_ptr[aarx] != NULL;
+    }
+    if (!in_place) {
+      for (int aarx = 0; aarx < nb_rx; aarx++) {
+        output_ptr[aarx] = output[aarx];
+      }
     }
     c16_t *input_ptr[nb_tx] __attribute__((aligned(32)));
     for (int i = 0; i < nb_tx; i++) {
@@ -887,7 +898,7 @@ static int vrtsim_write_with_chanmod(vrtsim_state_t *vrtsim_state,
 #endif
 
     for (int aarx = 0; aarx < nb_rx; aarx++) {
-      vrtsim_write_internal(vrtsim_state, timestamp, output[aarx], nsamps, rx_antenna_offset + aarx);
+      vrtsim_write_internal(vrtsim_state, timestamp, in_place ? NULL : output[aarx], nsamps, rx_antenna_offset + aarx);
     }
     rx_antenna_offset += nb_rx;
   }

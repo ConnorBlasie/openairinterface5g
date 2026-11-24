@@ -10,6 +10,8 @@
 #include <semaphore.h>
 
 #define SHM_MAGIC_NUMBER 0x12345678
+// Ring length in samples, for each antenna
+#define CIRCULAR_BUFFER_SIZE (30720 * 20)
 
 /**
  * ShmTdIqChannel is a shared memory bidirectional time domain IQ channel with a single clock
@@ -72,6 +74,17 @@ IQChannelErrorType shm_td_iq_channel_tx(ShmTDIQChannel *channel,
                                         uint64_t num_samples,
                                         int antenna,
                                         const sample_t *tx_iq_data);
+
+/**
+ * In-place TX for a producer that writes the ring itself (e.g. a GPU kernel): the address of
+ * [timestamp, timestamp + num_samples) for one antenna, or NULL if shm_td_iq_channel_tx() would reject the span or it wraps.
+ */
+sample_t *shm_td_iq_channel_tx_ptr(ShmTDIQChannel *channel, uint64_t timestamp, uint64_t num_samples, int antenna);
+
+/**
+ * Call after the in-place write. TOO_LATE (span cleared) if the reader passed the span during the write.
+ */
+IQChannelErrorType shm_td_iq_channel_tx_commit(ShmTDIQChannel *channel, uint64_t timestamp, uint64_t num_samples, int antenna);
 
 /**
  * @brief Receive iq data from the channel

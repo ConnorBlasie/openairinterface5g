@@ -16,8 +16,6 @@
 #include "utils.h"
 #include "common/utils/threadPool/pthread_utils.h"
 
-#define CIRCULAR_BUFFER_SIZE (30720 * 20)
-
 typedef struct {
   int magic;
   int num_antennas_tx;
@@ -160,23 +158,28 @@ ShmTDIQChannel *shm_td_iq_channel_connect(const char *name, int timeout_in_secon
   return channel;
 }
 
+static IQChannelErrorType tx_check(const ShmTDIQChannel *channel, uint64_t timestamp, uint64_t num_samples, int antenna)
+{
+  AssertFatal(antenna < channel->nb_tx_ant, "Invalid antenna index %d num_antennas %d\n", antenna, channel->nb_tx_ant);
+  // timestamp in the past
+  uint64_t current_time = channel->data->timestamp;
+  if (timestamp < current_time)
+    return CHANNEL_ERROR_TOO_LATE;
+  // timestamp is too far in the future
+  if (timestamp - current_time + num_samples >= CIRCULAR_BUFFER_SIZE)
+    return CHANNEL_ERROR_TOO_EARLY;
+  return CHANNEL_NO_ERROR;
+}
+
 IQChannelErrorType shm_td_iq_channel_tx(ShmTDIQChannel *channel,
                                         uint64_t timestamp,
                                         uint64_t num_samples,
                                         int antenna,
                                         const sample_t *tx_iq_data)
 {
-  AssertFatal(antenna < channel->nb_tx_ant, "Invalid antenna index %d num_antennas %d\n", antenna, channel->nb_tx_ant);
-  ShmTDIQChannelData *data = channel->data;
-  // timestamp in the past
-  uint64_t current_time = data->timestamp;
-  if (timestamp < current_time) {
-    return CHANNEL_ERROR_TOO_LATE;
-  }
-  // timestamp is too far in the future
-  if (timestamp - current_time + num_samples >= CIRCULAR_BUFFER_SIZE) {
-    return CHANNEL_ERROR_TOO_EARLY;
-  }
+  IQChannelErrorType err = tx_check(channel, timestamp, num_samples, antenna);
+  if (err != CHANNEL_NO_ERROR)
+    return err;
 
   sample_t *base_ptr = channel->tx_iq_data + antenna * CIRCULAR_BUFFER_SIZE;
 
@@ -190,6 +193,27 @@ IQChannelErrorType shm_td_iq_channel_tx(ShmTDIQChannel *channel,
     memcpy(base_ptr + first_sample, tx_iq_data, num_samples * sizeof(sample_t));
   }
   return CHANNEL_NO_ERROR;
+}
+
+sample_t *shm_td_iq_channel_tx_ptr(ShmTDIQChannel *channel, uint64_t timestamp, uint64_t num_samples, int antenna)
+{
+  if (tx_check(channel, timestamp, num_samples, antenna) != CHANNEL_NO_ERROR)
+    return NULL;
+  uint64_t first_sample = timestamp % CIRCULAR_BUFFER_SIZE;
+  if (first_sample + num_samples > CIRCULAR_BUFFER_SIZE)
+    return NULL;
+  return channel->tx_iq_data + antenna * CIRCULAR_BUFFER_SIZE + first_sample;
+}
+
+IQChannelErrorType shm_td_iq_channel_tx_commit(ShmTDIQChannel *channel, uint64_t timestamp, uint64_t num_samples, int antenna)
+{
+  if (timestamp >= channel->data->timestamp)
+    return CHANNEL_NO_ERROR;
+  // The reader passed this span during the write: clear it, as shm_td_iq_channel_tx() would not have written it.
+  memset(channel->tx_iq_data + antenna * CIRCULAR_BUFFER_SIZE + timestamp % CIRCULAR_BUFFER_SIZE,
+         0,
+         num_samples * sizeof(sample_t));
+  return CHANNEL_ERROR_TOO_LATE;
 }
 
 IQChannelErrorType shm_td_iq_channel_rx(ShmTDIQChannel *channel,
