@@ -91,6 +91,7 @@
 #define CONFIG_STRING_ORU_DPDK_DEVICES "dpdk_devices"
 #define CONFIG_STRING_RX_CORE "rx_core"
 #define CONFIG_STRING_NORTH_CORES "north_cores"
+#define CONFIG_STRING_NORTH_HELPER_CORES "north_helper_cores"
 #define CONFIG_STRING_SOUTH_CORE "south_core"
 #define CONFIG_STRING_UL_WORKER_CORES "ul_worker_cores"
 #define CONFIG_STRING_EXTRA_EAL_ARGS "extra_eal_args"
@@ -118,6 +119,9 @@
 #define HLP_NORTH_CORES                                                                                                       \
   "CPU cores for O-RU north reader threads (one entry per thread, -1 = unpinned). List length sets the number of DL readers " \
   "(default [-1] = one unpinned reader)."
+#define HLP_NORTH_HELPER_CORES                                                                                       \
+  "CPU cores for DL helper threads, the same count for each north reader (reader i: entries [i * n, (i + 1) * n)). " \
+  "A reader and its n helpers split each DL symbol's antennas. Empty: the reader does the whole symbol."
 #define HLP_SOUTH_CORE "CPU core for the O-RU south (UL) reader thread; -1 for no pinning."
 #define HLP_UL_WORKER_CORES "CPU cores for the UL Tpool workers; empty falls back to RUs.tp_cores."
 #define HLP_EXTRA_EAL_ARGS "Extra arguments passed to RTE_EAL_INIT."
@@ -160,6 +164,7 @@
   {CONFIG_STRING_ORU_DPDK_DEVICES,           HLP_DPDK_DEVICES,      PARAMFLAG_MANDATORY,    .strptr=NULL,     .defstrval=NULL,              TYPE_STRINGLIST,   0}, \
   {CONFIG_STRING_RX_CORE,                    HLP_RX_CORE,           PARAMFLAG_MANDATORY,    .iptr=NULL,       .defintval=-1,                TYPE_INT,          0}, \
   {CONFIG_STRING_NORTH_CORES,                HLP_NORTH_CORES,       0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}, \
+  {CONFIG_STRING_NORTH_HELPER_CORES,         HLP_NORTH_HELPER_CORES, 0,                     .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}, \
   {CONFIG_STRING_SOUTH_CORE,                 HLP_SOUTH_CORE,        0,                      .iptr=NULL,       .defintval=-1,                TYPE_INT,          0}, \
   {CONFIG_STRING_UL_WORKER_CORES,            HLP_UL_WORKER_CORES,   0,                      .iptr=NULL,       .defintarrayval=NULL,         TYPE_INTARRAY,     0}, \
   {CONFIG_STRING_EXTRA_EAL_ARGS,             HLP_EXTRA_EAL_ARGS,    0,                      .strptr=NULL,     .defstrval=NULL,              TYPE_STRINGLIST,   0}, \
@@ -560,6 +565,17 @@ int get_oru_options(ORU_t *oru)
     for (int i = 0; i < oru->num_dl_read_threads; i++)
       oru->north_cores[i] = gpd(fh_param, nump, CONFIG_STRING_NORTH_CORES)->iptr[i];
   }
+  const paramdef_t *helpers = gpd(fh_param, nump, CONFIG_STRING_NORTH_HELPER_CORES);
+  AssertFatal(
+      helpers->numelt % oru->num_dl_read_threads == 0 && helpers->numelt / oru->num_dl_read_threads <= MAX_DL_HELPERS_PER_READER,
+      "%s has %d entries; need n per DL reader (%d readers), n <= %d\n",
+      CONFIG_STRING_NORTH_HELPER_CORES,
+      helpers->numelt,
+      oru->num_dl_read_threads,
+      MAX_DL_HELPERS_PER_READER);
+  oru->num_dl_helpers = helpers->numelt / oru->num_dl_read_threads;
+  for (int i = 0; i < helpers->numelt; i++)
+    oru->north_helper_cores[i] = helpers->iptr[i];
   oru->south_core = *gpd(fh_param, nump, CONFIG_STRING_SOUTH_CORE)->iptr;
   oru->num_ul_worker_cores = gpd(fh_param, nump, CONFIG_STRING_UL_WORKER_CORES)->numelt;
   AssertFatal(oru->num_ul_worker_cores <= MAX_ORU_UL_WORKERS,
@@ -764,27 +780,126 @@ static void dl_symbol_completed(ORU_t *oru, uint64_t abs_symbol)
   symbol_reorder_advance(oru->dl_reorder, abs_symbol, 1);
 }
 
-static void dl_symbol_process(ORU_t *oru, int frame, int slot, int symbol, c16_t **txDataF, int64_t timestamp, uint64_t abs_symbol)
+// One DL symbol, shared by a reader and its helpers
+typedef struct {
+  int slot;
+  int symbol;
+  c16_t **txDataF;
+  const dl_iq_stream_t *streams;
+  int num_streams;
+} dl_symbol_task_t;
+
+typedef struct {
+  _Alignas(64) _Atomic uint64_t seq;
+} dl_seq_t;
+
+// A reader posts a task with a new sequence number; helper h does antenna chunk h + 1 and reports the sequence it
+// finished. Each sequence number on its own cache line: the reader and the helpers spin on them.
+typedef struct dl_split_s {
+  ORU_t *oru;
+  int num_chunks; // helpers + 1 (the reader does chunk 0)
+  dl_symbol_task_t task;
+  dl_seq_t posted;
+  dl_seq_t done[MAX_DL_HELPERS_PER_READER];
+} dl_split_t;
+
+typedef struct {
+  dl_split_t *split;
+  int chunk;
+} dl_helper_arg_t;
+
+static inline void dl_spin_pause(void)
+{
+#if defined(__aarch64__)
+  __asm__ volatile("yield");
+#elif defined(__x86_64__)
+  __builtin_ia32_pause();
+#endif
+}
+
+// Beamforming (with this symbol's phase rotation) and OFDM modulation of antennas [a0, a1) of chunk of num_chunks
+static void dl_symbol_chunk(ORU_t *oru, const dl_symbol_task_t *t, int chunk, int num_chunks)
+{
+  RU_t *ru = oru->ru;
+  NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
+  const int a0 = chunk * ru->nb_tx / num_chunks;
+  const int a1 = (chunk + 1) * ru->nb_tx / num_chunks;
+  const int n_sc = fp->N_RB_DL * NR_NB_SC_PER_RB;
+  const c16_t rotation = *(fp->symbol_rotation[0] + (t->slot % fp->slots_per_subframe) * fp->symbols_per_slot + t->symbol);
+  const oru_bfw_source_t bfw = {.ctx = oru->fronthaul, .get = oru_fh_get_bf_weights};
+  combine_dl_streams_ants(t->txDataF, ru->nb_tx, a0, a1, n_sc, t->streams, t->num_streams, &oru->codebook, &bfw, rotation);
+
+  const uint32_t offset = get_samples_slot_timestamp(fp, t->slot) + get_samples_symbol_timestamp(fp, t->slot, t->symbol);
+  __attribute__((aligned(64))) c16_t txdataF_shifted[fp->ofdm_symbol_size];
+  memset(txdataF_shifted, 0, sizeof(txdataF_shifted));
+  for (int aatx = a0; aatx < a1; aatx++) {
+    // txDataF is already phase-rotated by combine_dl_streams_ants() - don't rotate again.
+    // Inverse FFT shift: contiguous PRB format received from the DU -> layout expected by the IDFT
+    fftshift_inverse(t->txDataF[aatx], txdataF_shifted, n_sc, fp->ofdm_symbol_size);
+    fft_and_cp_insertion(fp, txdataF_shifted, (c16_t *)&ru->common.txdata[aatx][offset], t->slot, t->symbol);
+  }
+}
+
+static void *oru_north_helper_worker(void *arg)
+{
+  dl_helper_arg_t *h = arg;
+  dl_split_t *s = h->split;
+  uint64_t seen = 0;
+  while (!oai_exit) {
+    const uint64_t seq = atomic_load_explicit(&s->posted.seq, memory_order_acquire);
+    if (seq == seen) {
+      dl_spin_pause();
+      continue;
+    }
+    seen = seq;
+    dl_symbol_chunk(s->oru, &s->task, h->chunk, s->num_chunks);
+    atomic_store_explicit(&s->done[h->chunk - 1].seq, seq, memory_order_release);
+  }
+  return NULL;
+}
+
+void oru_start_dl_helpers(ORU_t *oru)
+{
+  for (int r = 0; r < oru->num_dl_read_threads; r++) {
+    dl_split_t *s = aligned_alloc(64, sizeof(*s));
+    AssertFatal(s != NULL, "dl_split allocation failed\n");
+    memset(s, 0, sizeof(*s));
+    s->oru = oru;
+    s->num_chunks = oru->num_dl_helpers + 1;
+    oru->dl_split[r] = s;
+    for (int h = 0; h < oru->num_dl_helpers; h++) {
+      dl_helper_arg_t *arg = malloc(sizeof(*arg));
+      AssertFatal(arg != NULL, "dl helper argument allocation failed\n");
+      *arg = (dl_helper_arg_t){.split = s, .chunk = h + 1};
+      char name[32];
+      snprintf(name, sizeof(name), "north_help_%d_%d", r, h);
+      const int idx = r * oru->num_dl_helpers + h;
+      threadCreate(&oru->dl_helper_threads[idx],
+                   oru_north_helper_worker,
+                   arg,
+                   name,
+                   oru->north_helper_cores[idx],
+                   OAI_PRIORITY_RT_MAX);
+    }
+  }
+}
+
+// Combines and modulates one DL symbol on all antennas: the reader does chunk 0, its helpers the others
+static void dl_symbol_process(ORU_t *oru, dl_split_t *split, const dl_symbol_task_t *task, uint64_t abs_symbol)
 {
   struct timespec start, end;
   clock_gettime(CLOCK_MONOTONIC, &start);
 
-  RU_t *ru = oru->ru;
-  NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
-  uint32_t slot_offset = get_samples_slot_timestamp(fp, slot);
-  uint32_t symbol_offset = get_samples_symbol_timestamp(fp, slot, symbol);
-
-  __attribute__((aligned(64))) c16_t txdataF_shifted[fp->ofdm_symbol_size];
-  memset(txdataF_shifted, 0, sizeof(txdataF_shifted));
-  for (int aatx = 0; aatx < ru->nb_tx; aatx++) {
-    // txDataF is already phase-rotated by combine_dl_streams() - don't rotate again.
-    // Inverse FFT shift: contiguous PRB format received from the DU -> layout expected by the IDFT
-    fftshift_inverse(txDataF[aatx], txdataF_shifted, fp->N_RB_DL * NR_NB_SC_PER_RB, fp->ofdm_symbol_size);
-    fft_and_cp_insertion(ru->nr_frame_parms,
-                         txdataF_shifted,
-                         (c16_t *)&ru->common.txdata[aatx][slot_offset + symbol_offset],
-                         slot,
-                         symbol);
+  if (split->num_chunks > 1) {
+    split->task = *task;
+    const uint64_t seq = atomic_load_explicit(&split->posted.seq, memory_order_relaxed) + 1;
+    atomic_store_explicit(&split->posted.seq, seq, memory_order_release);
+    dl_symbol_chunk(oru, task, 0, split->num_chunks);
+    for (int h = 0; h < split->num_chunks - 1; h++)
+      while (atomic_load_explicit(&split->done[h].seq, memory_order_acquire) != seq && !oai_exit)
+        dl_spin_pause();
+  } else {
+    dl_symbol_chunk(oru, task, 0, 1);
   }
 
   clock_gettime(CLOCK_MONOTONIC, &end);
@@ -801,24 +916,6 @@ static void dl_symbol_process(ORU_t *oru, int frame, int slot, int symbol, c16_t
   }
 
   dl_symbol_completed(oru, abs_symbol);
-}
-
-// Computes this symbol's phase rotation and hands off to combine_dl_streams() (oru_beamforming.c).
-static void assemble_dl_symbol(ORU_t *oru,
-                               int slot,
-                               int symbol,
-                               c16_t **txDataF,
-                               int n_rb_dl,
-                               const dl_iq_stream_t *streams,
-                               int num_streams)
-{
-  RU_t *ru = (RU_t *)oru->ru;
-  NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
-  const int n_sc = n_rb_dl * NR_NB_SC_PER_RB;
-  c16_t rotation = *(fp->symbol_rotation[0] + (slot % fp->slots_per_subframe) * fp->symbols_per_slot + symbol);
-
-  const oru_bfw_source_t bfw = {.ctx = oru->fronthaul, .get = oru_fh_get_bf_weights};
-  combine_dl_streams(txDataF, ru->nb_tx, n_sc, streams, num_streams, &oru->codebook, &bfw, rotation);
 }
 
 static pthread_mutex_t south_read_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -863,6 +960,7 @@ void *oru_north_read_worker(void *arg)
 
   RU_t *ru = (RU_t *)oru->ru;
   NR_DL_FRAME_PARMS *fp = ru->nr_frame_parms;
+  dl_split_t *split = oru->dl_split[atomic_fetch_add(&oru->dl_reader_next, 1)];
 
   __attribute__((aligned(64))) c16_t txDataF[ru->nb_tx][fp->N_RB_DL * NR_NB_SC_PER_RB];
   memset(txDataF, 0, sizeof(txDataF));
@@ -942,9 +1040,13 @@ anchor_ready:
     if (timestamp < 0) {
       continue;
     }
-    assemble_dl_symbol(oru, slot, symbol, txDataF_ptr, fp->N_RB_DL, dl_streams, num_streams);
     uint64_t abs_symbol = num_frames * (fp->slots_per_frame * fp->symbols_per_slot) + slot * fp->symbols_per_slot + symbol;
-    dl_symbol_process(oru, frame, slot, symbol, txDataF_ptr, timestamp, abs_symbol);
+    const dl_symbol_task_t task = {.slot = slot,
+                                   .symbol = symbol,
+                                   .txDataF = txDataF_ptr,
+                                   .streams = dl_streams,
+                                   .num_streams = num_streams};
+    dl_symbol_process(oru, split, &task, abs_symbol);
     if (frame % 256 == 0 && slot == 0 && symbol == 0) {
       LOG_I(PHY, "[RU_thread] read data: frame %d, slot %d, symbol %d\n", frame, slot, symbol);
     }

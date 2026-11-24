@@ -272,6 +272,7 @@ int main(int argc, char **argv)
                "south_write_thread",
                oru.tx_write.core,
                OAI_PRIORITY_RT_MAX);
+  oru_start_dl_helpers(&oru);
   for (int i = 0; i < oru.num_dl_read_threads; i++) {
     char thread_name[32];
     snprintf(thread_name, sizeof(thread_name), "north_read_%d", i);

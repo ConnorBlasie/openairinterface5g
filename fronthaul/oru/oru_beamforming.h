@@ -51,6 +51,19 @@ void combine_dl_streams(c16_t **txDataF,
                         const oru_bfw_source_t *bfw,
                         c16_t rotation);
 
+// combine_dl_streams() for physical antennas [a0, a1) of nb_tx only: writes and zeroes txDataF[a0..a1) and nothing
+// else, so threads can combine disjoint antenna ranges of one symbol in parallel.
+void combine_dl_streams_ants(c16_t **txDataF,
+                             int nb_tx,
+                             int a0,
+                             int a1,
+                             int n_sc,
+                             const dl_iq_stream_t *streams,
+                             int num_streams,
+                             const oru_codebook_t *cb,
+                             const oru_bfw_source_t *bfw,
+                             c16_t rotation);
+
 // UL Rx beamforming: combine per-antenna FFT output into one beam stream over bins [k0, k0 + nk),
 // out[k] = sum_a w[beam][a][stream] * fft_data[a][k]. The codebook holds transmit weights: DL beam w
 // reaches a UE with channel h when w is proportional to conj(h), and the UL channel is the same h, so

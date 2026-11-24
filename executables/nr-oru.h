@@ -13,7 +13,10 @@
 #include "oru_beamforming.h"
 
 #define MAX_DL_READ_THREADS 8
+#define MAX_DL_HELPERS_PER_READER 7
 #define MAX_ORU_UL_WORKERS 8
+
+struct dl_split_s;
 
 typedef struct {
   RU_t *ru;
@@ -44,12 +47,18 @@ typedef struct {
   int numerology;
 
   int north_cores[MAX_DL_READ_THREADS]; ///< affinity for DL reader i (-1 = unpinned); length sets num_dl_read_threads
+  /// affinity of helper h of DL reader i at [i * num_dl_helpers + h]
+  int north_helper_cores[MAX_DL_READ_THREADS * MAX_DL_HELPERS_PER_READER];
+  int num_dl_helpers; ///< helpers per DL reader: each symbol's antennas are split over the reader and its helpers
   int south_core;
   int ul_worker_cores[MAX_ORU_UL_WORKERS];
   int num_ul_worker_cores;
 
   int num_dl_read_threads;
   pthread_t dl_read_threads[MAX_DL_READ_THREADS];
+  pthread_t dl_helper_threads[MAX_DL_READ_THREADS * MAX_DL_HELPERS_PER_READER];
+  struct dl_split_s *dl_split[MAX_DL_READ_THREADS];
+  _Atomic int dl_reader_next; ///< next free dl_split index, taken by each DL reader at start
   pthread_t south_read_thread;
   pthread_t south_write_thread;
 
@@ -92,6 +101,7 @@ typedef struct {
 int get_oru_options(ORU_t *oru);
 void oru_init_frame_parms(ORU_t *oru);
 void *oru_north_read_worker(void *arg);
+void oru_start_dl_helpers(ORU_t *oru);
 void *oru_south_read_thread(void *arg);
 void *oru_south_write_thread(void *arg);
 void prepare_prach_item(ORU_t *oru);

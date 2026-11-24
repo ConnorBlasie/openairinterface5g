@@ -12,21 +12,17 @@
 // The combine takes codebook rows and dynamic weights into the same buffer of ORU_MAX_BF_WEIGHTS
 _Static_assert(ORU_MAX_BF_WEIGHTS >= ORU_CODEBOOK_MAX_NB_TX, "a codebook row must fit a weight buffer");
 
-static void combine_passthrough(c16_t **txDataF,
-                                int nb_tx,
-                                int n_sc,
-                                const dl_iq_stream_t *streams,
-                                int num_streams,
-                                c16_t rotation)
+static void
+combine_passthrough(c16_t **txDataF, int a0, int a1, int n_sc, const dl_iq_stream_t *streams, int num_streams, c16_t rotation)
 {
-  for (int aatx = 0; aatx < nb_tx; aatx++) {
+  for (int aatx = a0; aatx < a1; aatx++) {
     memset(txDataF[aatx], 0, n_sc * sizeof(c16_t));
   }
 
   // Direct overwrite, assume no overalpping streams on the same tx antenna.
   for (int i = 0; i < num_streams; i++) {
     const dl_iq_stream_t *stream = &streams[i];
-    if (stream->ant_id >= (unsigned)nb_tx) {
+    if (stream->ant_id < (unsigned)a0 || stream->ant_id >= (unsigned)a1) {
       continue;
     }
     c16_t *dst = &txDataF[stream->ant_id][stream->start_prb * NR_NB_SC_PER_RB];
@@ -64,6 +60,8 @@ static int bfw_run(const oru_bfw_source_t *bfw, const oru_bfw_set_t *set, int pr
 
 static void combine_codebook(c16_t **txDataF,
                              int nb_tx,
+                             int a0,
+                             int a1,
                              int n_sc,
                              const dl_iq_stream_t *streams,
                              int num_streams,
@@ -71,7 +69,7 @@ static void combine_codebook(c16_t **txDataF,
                              const oru_bfw_source_t *bfw,
                              c16_t rotation)
 {
-  for (int aatx = 0; aatx < nb_tx; aatx++) {
+  for (int aatx = a0; aatx < a1; aatx++) {
     memset(txDataF[aatx], 0, n_sc * sizeof(c16_t));
   }
 
@@ -99,14 +97,14 @@ static void combine_codebook(c16_t **txDataF,
           warned = true;
           bidx = 0;
         }
-        for (int txru = 0; txru < nb_tx; txru++)
+        for (int txru = a0; txru < a1; txru++)
           w[txru] = cb->w[bidx][txru][stream->ant_id];
         num_w = nb_tx;
       }
       const c16_t *src = (const c16_t *)stream->iq + (prb - stream->start_prb) * NR_NB_SC_PER_RB;
       const int n_re = (run_end - prb) * NR_NB_SC_PER_RB;
       const int re_off = prb * NR_NB_SC_PER_RB;
-      for (int txru = 0; txru < nb_tx && txru < num_w; txru++) {
+      for (int txru = a0; txru < a1 && txru < num_w; txru++) {
         // Fold rotation into the weight once, instead of a separate rotate pass afterward. Fused
         // multiply+saturating-accumulate straight into txDataF - no scratch buffer, one pass. The fold
         // saturates too: weights are arbitrary int16 from config or the DU, so w * rotation can exceed Q1.15.
@@ -115,6 +113,24 @@ static void combine_codebook(c16_t **txDataF,
       }
       prb = run_end;
     }
+  }
+}
+
+void combine_dl_streams_ants(c16_t **txDataF,
+                             int nb_tx,
+                             int a0,
+                             int a1,
+                             int n_sc,
+                             const dl_iq_stream_t *streams,
+                             int num_streams,
+                             const oru_codebook_t *cb,
+                             const oru_bfw_source_t *bfw,
+                             c16_t rotation)
+{
+  if (cb->nb_fh_streams <= 0) {
+    combine_passthrough(txDataF, a0, a1, n_sc, streams, num_streams, rotation);
+  } else {
+    combine_codebook(txDataF, nb_tx, a0, a1, n_sc, streams, num_streams, cb, bfw, rotation);
   }
 }
 
@@ -127,11 +143,7 @@ void combine_dl_streams(c16_t **txDataF,
                         const oru_bfw_source_t *bfw,
                         c16_t rotation)
 {
-  if (cb->nb_fh_streams <= 0) {
-    combine_passthrough(txDataF, nb_tx, n_sc, streams, num_streams, rotation);
-  } else {
-    combine_codebook(txDataF, nb_tx, n_sc, streams, num_streams, cb, bfw, rotation);
-  }
+  combine_dl_streams_ants(txDataF, nb_tx, 0, nb_tx, n_sc, streams, num_streams, cb, bfw, rotation);
 }
 
 // out[k] = sum_a w[a] * fft_data[a][k] over bins [k0, k0 + nk), a < nb_ant

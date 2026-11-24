@@ -609,6 +609,70 @@ TEST(oru_beamforming, dl_no_dynamic_weights_uses_codebook)
     expect_dl_run(tx_with[txru], (const c16_t *)iq_buf, 0, N_RB, cb.w[1][txru][0], rotation, txru);
 }
 
+// Antenna ranges that cover nb_tx give the full combine bit for bit, and leave the antennas outside the range untouched.
+// Codebook (dynamic weights, beamId-only and overwritten bundles, two streams) and passthrough.
+TEST(oru_beamforming, dl_antenna_ranges_match_full_combine)
+{
+  enum { NB_TX = 8, NRB = 4, NSC = NRB * NR_NB_SC_PER_RB };
+  static oru_codebook_t cb;
+  memset(&cb, 0, sizeof(cb));
+  cb.nb_fh_streams = 2;
+  cb.nb_beams = 2;
+  for (int b = 0; b < 2; b++)
+    for (int a = 0; a < NB_TX; a++)
+      for (int s = 0; s < 2; s++)
+        cb.w[b][a][s] = (c16_t){.r = (int16_t)(3000 * b + 1000 * a - 500 * s), .i = (int16_t)(-700 * a + 2000 * s + 100 * b)};
+  fake_bfw f = {.ret = {NB_TX, 0, -1}, .beam_id = {0, 1, 0}};
+  for (int a = 0; a < NB_TX; a++)
+    f.w[0][a] = (c16_t){.r = (int16_t)(-4000 + 900 * a), .i = (int16_t)(12000 - 1500 * a)};
+  const oru_bfw_source_t bfw = {.ctx = &f, .get = fake_get_bf_weights};
+  const c16_t rotation = {.r = 23170, .i = -23170};
+
+  uint32_t iq0[NSC], iq1[NSC];
+  fill_iq(iq0, NSC, 150);
+  fill_iq(iq1, NSC, -90);
+  dl_iq_stream_t streams[2] = {{.ant_id = 0, .beam_id = 0, .start_prb = 0, .num_prb = NRB, .iq = iq0},
+                               {.ant_id = 1, .beam_id = 1, .start_prb = 1, .num_prb = 2, .iq = iq1}};
+  streams[0].bfw = (oru_bfw_set_t){.num_bundles = 3, .bundle_prbs = 2, .first_prb = -1};
+
+  oru_codebook_t passthrough = {.nb_fh_streams = 0};
+  dl_iq_stream_t pt_streams[2] = {{.ant_id = 2, .beam_id = 0, .start_prb = 0, .num_prb = NRB, .iq = iq0},
+                                  {.ant_id = 6, .beam_id = 0, .start_prb = 1, .num_prb = 2, .iq = iq1}};
+
+  const struct {
+    const oru_codebook_t *cb;
+    const dl_iq_stream_t *streams;
+    const oru_bfw_source_t *bfw;
+  } cases[] = {{&cb, streams, &bfw}, {&passthrough, pt_streams, NULL}};
+  const std::vector<std::vector<int>> splits = {{0, 3, NB_TX}, {0, 1, 2, 3, 4, 5, 6, 7, NB_TX}, {0, 4, NB_TX}};
+  for (const auto &c : cases) {
+    static uint32_t full_buf[NB_TX][NSC];
+    c16_t *full[NB_TX];
+    for (int a = 0; a < NB_TX; a++)
+      full[a] = (c16_t *)full_buf[a];
+    combine_dl_streams(full, NB_TX, NSC, c.streams, 2, c.cb, c.bfw, rotation);
+    for (const auto &split : splits) {
+      static uint32_t part_buf[NB_TX][NSC];
+      c16_t *part[NB_TX];
+      for (int a = 0; a < NB_TX; a++)
+        part[a] = (c16_t *)part_buf[a];
+      for (size_t r = 0; r + 1 < split.size(); r++) {
+        memset(part_buf, 0x5a, sizeof(part_buf));
+        combine_dl_streams_ants(part, NB_TX, split[r], split[r + 1], NSC, c.streams, 2, c.cb, c.bfw, rotation);
+        for (int a = 0; a < NB_TX; a++) {
+          const bool in = a >= split[r] && a < split[r + 1];
+          for (int re = 0; re < NSC; re++) {
+            if (in)
+              ASSERT_EQ(part_buf[a][re], full_buf[a][re]) << "antenna " << a << " re " << re;
+            else
+              ASSERT_EQ(part_buf[a][re], 0x5a5a5a5au) << "antenna " << a << " touched by range " << split[r];
+          }
+        }
+      }
+    }
+  }
+}
+
 // ext11 bundles of 2 PRBs starting one PRB before the section (bundleOffset 1): bundle 0 has weights, bundle 1 only a
 // beamId (codebook row of that beam), bundle 2 was overwritten (no output). A fragment that starts inside a bundle reads
 // its IQ from the right offset.
